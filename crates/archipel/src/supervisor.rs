@@ -398,6 +398,9 @@ impl Supervisor {
         } else {
             PathBuf::from(program)
         };
+        if program.starts_with(&dir) && !program.exists() {
+            bail!("{}", missing_program(&program, &dir, uid).await);
+        }
         let mut env: BTreeMap<String, String> = BTreeMap::new();
         for (k, v) in &game.run.env {
             env.insert(k.clone(), template::render(v, &ctx)?);
@@ -769,6 +772,53 @@ pub fn context(
         ),
     );
     ctx
+}
+
+/// Why the game's program is not there, and where files of its name are: what
+/// fixes a game definition whose command names the wrong path.
+async fn missing_program(program: &Path, dir: &Path, uid: u32) -> String {
+    let name = program
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    let root = dir.to_path_buf();
+    let found = fsops::as_user(uid, move || {
+        let mut found = Vec::new();
+        let mut stack = vec![(root.clone(), 0)];
+        while let Some((d, depth)) = stack.pop() {
+            for entry in std::fs::read_dir(&d)?.flatten() {
+                let path = entry.path();
+                let kind = entry.file_type()?;
+                if kind.is_dir() && depth < 4 {
+                    stack.push((path.clone(), depth + 1));
+                }
+                if entry.file_name() == name {
+                    found.push(
+                        path.strip_prefix(&root)
+                            .unwrap_or(&path)
+                            .display()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(found)
+    })
+    .await
+    .unwrap_or_default();
+    let shown = program
+        .strip_prefix(dir)
+        .unwrap_or(program)
+        .display()
+        .to_string();
+    if found.is_empty() {
+        format!("the game's program {shown} is not in the server's directory")
+    } else {
+        format!(
+            "the game's program is not at {shown}; files of that name: {}",
+            found.join(", ")
+        )
+    }
 }
 
 /// Spawns `cmd` as the server's user, in its cgroup, in a session of its own
