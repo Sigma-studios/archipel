@@ -12,7 +12,9 @@ install = { kind = "steamcmd", app_id = 3481440 }
 connect = "{host}:{port.game}"
 
 [run]
-command = ["./Puck.x86_64"]
+# The Linux server is a Unity player, run without a screen.
+command = ["./Puck", "-batchmode", "-nographics"]
+env = { LD_LIBRARY_PATH = "{dir}" }
 stop_signal = "SIGINT"
 stop_timeout_secs = 20
 ready = "Server authenticated"
