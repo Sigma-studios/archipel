@@ -937,3 +937,4 @@ input:disabled, textarea:disabled { background: var(--surface-2); color: var(--t
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+.app-version { text-align: center; padding: 24px 0 16px; }

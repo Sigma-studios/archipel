@@ -291,6 +291,19 @@ pub fn set_mode(mode: archipel_core::api::Mode) {
     MODE.with(|m| m.set(mode));
 }
 
+thread_local! {
+    static VERSION: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+pub fn set_version(version: String) {
+    VERSION.with(|v| *v.borrow_mut() = version);
+}
+
+/// archipel's version and commit, as `/api/about` says.
+pub fn version() -> String {
+    VERSION.with(|v| v.borrow().clone())
+}
+
 /// The desktop app: no login, one owner, the quota is this PC.
 pub fn desktop() -> bool {
     MODE.with(|m| m.get()) == archipel_core::api::Mode::Desktop

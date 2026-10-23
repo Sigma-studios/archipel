@@ -113,7 +113,10 @@ async fn only_this_computer(req: axum::extract::Request, next: axum::middleware:
 async fn about(State(app): S) -> Json<About> {
     Json(About {
         mode: app.cfg.mode(),
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: match option_env!("ARCHIPEL_COMMIT") {
+            Some(commit) => format!("{} ({commit})", env!("CARGO_PKG_VERSION")),
+            None => env!("CARGO_PKG_VERSION").into(),
+        },
     })
 }
 

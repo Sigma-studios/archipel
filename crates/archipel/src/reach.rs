@@ -252,8 +252,15 @@ async fn forward(ip: Ipv4Addr, ports: &[u16], public_ip: Option<IpAddr>) -> (Sta
             }
         }
     }
+    let router = gateway().map_or("the router".to_string(), |gw| format!("the router ({gw})"));
     let detail = if problems.iter().all(|p| p.contains("no answer")) {
-        "the router answered neither UPnP nor NAT-PMP: UPnP is probably turned off".to_string()
+        let hidden = local_firewall()
+            .map(|f| format!(", or {f} on this PC hides its answers"))
+            .unwrap_or_default();
+        format!(
+            "{router} answered neither NAT-PMP nor UPnP, asked directly and on the whole \
+             network: UPnP may be off in its settings{hidden}"
+        )
     } else {
         problems.join("; ")
     };
@@ -553,13 +560,14 @@ pub fn local_ip() -> Option<Ipv4Addr> {
 /// (Fedora's), ufw's (when turned on).
 pub fn firewall_hint(first: u16, last: u16) -> Option<String> {
     let exists = |p: &str| std::path::Path::new(p).exists();
+    let nixos = is_nixos();
     let nixos_units = ["firewall.service", "nftables.service"]
         .map(|u| std::path::Path::new("/etc/systemd/system").join(u));
     // Without its units in sight (in appimage-run's sandbox), it may well be on.
     let nixos_blocks = !exists("/etc/systemd/system")
         || (nixos_units.iter().any(|u| u.exists())
             && !nixos_units.iter().any(|u| opens(u, first, last)));
-    if exists("/etc/NIXOS") && nixos_blocks {
+    if nixos && nixos_blocks {
         return Some(format!(
             "NixOS's firewall turns players away unless these ports are open in it: add \
              networking.firewall.allowedTCPPortRanges = [ {{ from = {first}; to = {last}; }} ]; \
@@ -582,6 +590,36 @@ pub fn firewall_hint(first: u16, last: u16) -> Option<String> {
         ));
     }
     None
+}
+
+/// NixOS, seen from the host or from appimage-run's sandbox (which keeps /run).
+fn is_nixos() -> bool {
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    exists("/etc/NIXOS")
+        || exists("/run/current-system/nixos-version")
+        || std::fs::read_to_string("/etc/os-release")
+            .is_ok_and(|r| r.lines().any(|l| l.trim() == "ID=nixos"))
+}
+
+/// A firewall on this computer, whatever ports it opens: it drops the answers
+/// to a search sent to the whole network.
+fn local_firewall() -> Option<&'static str> {
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    let nixos_on = ["firewall.service", "nftables.service"]
+        .iter()
+        .any(|u| exists(&format!("/etc/systemd/system/{u}")))
+        || !exists("/etc/systemd/system");
+    if is_nixos() && nixos_on {
+        Some("NixOS's firewall")
+    } else if exists("/run/firewalld") {
+        Some("firewalld")
+    } else if std::fs::read_to_string("/etc/ufw/ufw.conf")
+        .is_ok_and(|c| c.lines().any(|l| l.trim() == "ENABLED=yes"))
+    {
+        Some("ufw")
+    } else {
+        None
+    }
 }
 
 /// Whether the NixOS firewall `unit` lets the pool in: its rules, in the scripts

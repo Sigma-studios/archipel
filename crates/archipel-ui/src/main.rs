@@ -29,10 +29,9 @@ fn App() -> impl IntoView {
     let ready = RwSignal::new(false);
     spawn_local(async move {
         // An archipel without `/api/about` predates the desktop app: hosted.
-        let mode = api::get::<About>("/api/about")
-            .await
-            .map_or(Mode::Hosted, |a| a.mode);
-        util::set_mode(mode);
+        let about = api::get::<About>("/api/about").await.ok();
+        util::set_mode(about.as_ref().map_or(Mode::Hosted, |a| a.mode));
+        util::set_version(about.map(|a| a.version).unwrap_or_default());
         ready.set(true);
     });
     view! {
@@ -40,6 +39,12 @@ fn App() -> impl IntoView {
             <div class="login"><components::Loading/></div>
         }>
             <Pages/>
+            <footer class="app-version muted small">
+                {move || {
+                    let v = util::version();
+                    (!v.is_empty()).then(|| format!("archipel {v}"))
+                }}
+            </footer>
         </Show>
         <ToastHost/>
     }
