@@ -1,0 +1,136 @@
+# Urban Terror 4.3: a free team shooter on the Quake 3 engine. Its 1.4 GB of game
+# files are downloaded once and shared by every server.
+id = "urbanterror"
+name = "Urban Terror"
+description = "Free, fast and realistic team shooter on the Quake 3 engine (4.3.4)."
+badge = "🎯"
+memory = { min_mb = 256, default_mb = 512 }
+ports = [{ name = "game", protocol = "udp", label = "Game" }]
+install = { kind = "shared", url = "http://cdn.urbanterror.info/urt/43/releases/zips/UrbanTerror434_full.zip", subdir = "UrbanTerror43" }
+connect = "/connect {host}:{port.game}"
+
+[run]
+command = [
+  "{base}/Quake3-UrT-Ded.x86_64",
+  "+set", "fs_basepath", "{base}",
+  "+set", "fs_homepath", "{dir}",
+  "+set", "fs_game", "q3ut4",
+  "+set", "dedicated", "{setting.listing}",
+  "+set", "net_port", "{port.game}",
+  "+set", "com_hunkmegs", "128",
+  "+set", "ttycon", "0",
+  "+exec", "archipel.cfg",
+]
+stop_command = "quit"
+stop_timeout_secs = 10
+
+[[settings]]
+key = "hostname"
+label = "Server name"
+type = "text"
+default = "^7An ^5archipel ^7server"
+max_len = 64
+
+[[settings]]
+key = "gametype"
+label = "Game type"
+type = "choice"
+default = "7"
+options = [
+  { value = "7", label = "Capture the flag" },
+  { value = "4", label = "Team survivor" },
+  { value = "3", label = "Team deathmatch" },
+  { value = "8", label = "Bomb" },
+  { value = "0", label = "Free for all" },
+  { value = "11", label = "Gun game" },
+  { value = "10", label = "Freeze tag" },
+  { value = "9", label = "Jump" },
+]
+
+[[settings]]
+key = "map"
+label = "First map"
+help = "The next ones come from the map cycle (Files tab)."
+type = "text"
+default = "ut4_turnpike"
+max_len = 64
+
+[[settings]]
+key = "max_players"
+label = "Players"
+type = "number"
+default = 16
+min = 2
+max = 32
+
+[[settings]]
+key = "timelimit"
+label = "Time limit (minutes)"
+type = "number"
+default = 20
+min = 0
+max = 120
+
+[[settings]]
+key = "password"
+label = "Password to join"
+help = "Empty: anyone can join."
+type = "secret"
+
+[[settings]]
+key = "listing"
+label = "Server list"
+type = "choice"
+default = "2"
+options = [
+  { value = "2", label = "Listed on the public server list" },
+  { value = "1", label = "Not listed (join by address)" },
+]
+
+[[files]]
+path = "q3ut4/archipel.cfg"
+format = "text"
+content = """
+// Written by archipel at each start, from the server's settings. Your own
+// settings go in server.cfg, read first.
+exec server.cfg
+set sv_hostname "{setting.hostname}"
+set g_gametype "{setting.gametype}"
+set sv_maxclients "{setting.max_players}"
+set timelimit "{setting.timelimit}"
+set g_password "{setting.password}"
+set g_mapcycle "mapcycle.txt"
+map {setting.map}
+"""
+
+[[files]]
+path = "q3ut4/server.cfg"
+label = "Your settings (server.cfg)"
+format = "text"
+editable = true
+initial = """
+// Your server's own settings, read at each start before the ones from its
+// settings page. See server_example.cfg in the game files for all of them.
+set sv_joinmessage "Have fun!"
+set g_friendlyfire "1"
+set g_respawndelay "4"
+set g_matchmode "0"
+"""
+
+[[files]]
+path = "q3ut4/mapcycle.txt"
+label = "Map cycle"
+format = "text"
+editable = true
+initial = """
+ut4_turnpike
+ut4_casa
+ut4_abbey
+ut4_algiers
+ut4_austria
+ut4_kingdom
+ut4_prague
+ut4_uptown
+ut4_tombs
+ut4_ramelle
+"""

@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The web UI only builds for wasm32 (with trunk, see crates/archipel-ui).
+default-members = ["crates/archipel-core", "crates/archipel"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# The web UI is downloaded by browsers: favour size.
+[profile.release.package.archipel-ui]
+opt-level = "z"
+codegen-units = 1

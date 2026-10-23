@@ -1,0 +1,92 @@
+# Puck: physics-based online hockey, its dedicated server from Steam.
+id = "puck"
+name = "Puck"
+description = "Physics-based online hockey. The dedicated server comes from Steam."
+badge = "🏒"
+memory = { min_mb = 1024, default_mb = 1536 }
+ports = [
+  { name = "game", protocol = "udp", label = "Game" },
+  { name = "ping", protocol = "udp", label = "Ping" },
+]
+install = { kind = "steamcmd", app_id = 3481440 }
+connect = "{host}:{port.game}"
+
+[run]
+command = ["./Puck.x86_64"]
+stop_signal = "SIGINT"
+stop_timeout_secs = 20
+ready = "Server authenticated"
+
+[[settings]]
+key = "name"
+label = "Server name"
+type = "text"
+default = "An archipel server"
+max_len = 64
+
+[[settings]]
+key = "max_players"
+label = "Players"
+type = "number"
+default = 10
+min = 2
+max = 32
+
+[[settings]]
+key = "password"
+label = "Password to join"
+help = "Empty: anyone can join."
+type = "secret"
+
+[[settings]]
+key = "public"
+label = "Listed on the public server list"
+type = "toggle"
+default = true
+
+[[settings]]
+key = "voip"
+label = "Voice chat"
+type = "toggle"
+default = false
+
+[[files]]
+path = "server_configuration.json"
+label = "Server configuration"
+format = "json"
+editable = true
+set = { port = "{port.game}", pingPort = "{port.ping}", name = "{setting.name}", maxPlayers = "{setting.max_players}", password = "{setting.password}", isPublic = "{setting.public}", voip = "{setting.voip}" }
+initial = """
+{
+  "port": 7777,
+  "pingPort": 7778,
+  "name": "An archipel server",
+  "maxPlayers": 10,
+  "password": "",
+  "voip": false,
+  "isPublic": true,
+  "adminSteamIds": [],
+  "reloadBannedSteamIds": false,
+  "usePuckBannedSteamIds": true,
+  "printMetrics": true,
+  "kickTimeout": 300,
+  "sleepTimeout": 60,
+  "joinMidMatchDelay": 10,
+  "targetFrameRate": 120,
+  "serverTickRate": 100,
+  "clientTickRate": 200,
+  "startPaused": false,
+  "allowVoting": true,
+  "phaseDurationMap": {
+    "Warmup": 600,
+    "FaceOff": 3,
+    "Playing": 300,
+    "BlueScore": 5,
+    "RedScore": 5,
+    "Replay": 10,
+    "PeriodOver": 15,
+    "GameOver": 15
+  },
+  "mods": []
+}
+"""

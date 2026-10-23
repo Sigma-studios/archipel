@@ -1,0 +1,33 @@
+[package]
+name = "archipel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+archipel-core = { path = "../archipel-core" }
+anyhow = "1"
+argon2 = "0.5"
+axum = "0.8"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+flate2 = "1"
+futures-util = "0.3"
+hex = "0.4"
+parking_lot = "0.12"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = "0.10"
+sha2 = "0.10"
+tar = "0.4"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+libc = "0.2"

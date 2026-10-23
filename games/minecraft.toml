@@ -1,0 +1,142 @@
+# Minecraft: Java Edition, vanilla or Paper (plugins).
+id = "minecraft"
+name = "Minecraft"
+description = "Java Edition. Vanilla, or Paper to run plugins."
+badge = "⛏️"
+memory = { min_mb = 1024, default_mb = 2048 }
+ports = [{ name = "game", protocol = "tcp", label = "Game" }]
+install = { kind = "minecraft" }
+connect = "{host}:{port.game}"
+
+[run]
+command = [
+  "{java}", "-Xms{java_memory_mb}M", "-Xmx{java_memory_mb}M",
+  "-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled",
+  # A plain console: no prompt nor colours in the web console.
+  "-Dterminal.jline=false", "-Dterminal.ansi=false",
+  "-jar", "server.jar", "nogui",
+]
+stop_command = "stop"
+stop_timeout_secs = 90
+ready = "Done ("
+
+[backup]
+before = ["save-off", "save-all flush"]
+wait_for = "Saved the game"
+after = ["save-on"]
+
+[[settings]]
+key = "eula"
+label = "I accept the Minecraft EULA"
+help = "Mojang requires every server's owner to accept it."
+link = "https://aka.ms/MinecraftEULA"
+type = "toggle"
+required = true
+
+[[settings]]
+key = "flavor"
+label = "Server"
+type = "choice"
+default = "paper"
+reinstall = true
+options = [
+  { value = "paper", label = "Paper (faster, runs plugins)" },
+  { value = "vanilla", label = "Vanilla (Mojang's own)" },
+]
+
+[[settings]]
+key = "version"
+label = "Version"
+help = "A Minecraft version like 1.21.4, or latest. Players need the same one."
+type = "text"
+default = "latest"
+max_len = 20
+reinstall = true
+
+[[settings]]
+key = "motd"
+label = "Message of the day"
+help = "Shown under the server's name in the server list."
+type = "text"
+default = "A Minecraft server on archipel"
+max_len = 120
+
+[[settings]]
+key = "max_players"
+label = "Players"
+type = "number"
+default = 10
+min = 1
+max = 200
+
+[[settings]]
+key = "gamemode"
+label = "Game mode"
+type = "choice"
+default = "survival"
+options = [
+  { value = "survival", label = "Survival" },
+  { value = "creative", label = "Creative" },
+  { value = "adventure", label = "Adventure" },
+  { value = "spectator", label = "Spectator" },
+]
+
+[[settings]]
+key = "difficulty"
+label = "Difficulty"
+type = "choice"
+default = "normal"
+options = [
+  { value = "peaceful", label = "Peaceful" },
+  { value = "easy", label = "Easy" },
+  { value = "normal", label = "Normal" },
+  { value = "hard", label = "Hard" },
+]
+
+[[settings]]
+key = "pvp"
+label = "Players can hurt each other"
+type = "toggle"
+default = true
+
+[[settings]]
+key = "whitelist"
+label = "Only players on the whitelist can join"
+help = "Add them from the console: whitelist add <name>."
+type = "toggle"
+default = false
+
+[[settings]]
+key = "online_mode"
+label = "Check players' accounts with Mojang"
+help = "Leave it on: off lets anyone join under any name."
+type = "toggle"
+default = true
+
+[[settings]]
+key = "view_distance"
+label = "View distance (chunks)"
+type = "number"
+default = 10
+min = 3
+max = 32
+
+[[settings]]
+key = "seed"
+label = "World seed"
+help = "Used when the world is created; empty for a random one."
+type = "text"
+default = ""
+max_len = 64
+
+[[files]]
+path = "eula.txt"
+format = "text"
+content = "eula={setting.eula}\n"
+
+[[files]]
+path = "server.properties"
+label = "Server properties"
+format = "properties"
+editable = true
+set = { "server-port" = "{port.game}", "query.port" = "{port.game}", "motd" = "{setting.motd}", "max-players" = "{setting.max_players}", "gamemode" = "{setting.gamemode}", "difficulty" = "{setting.difficulty}", "pvp" = "{setting.pvp}", "white-list" = "{setting.whitelist}", "enforce-whitelist" = "{setting.whitelist}", "online-mode" = "{setting.online_mode}", "view-distance" = "{setting.view_distance}", "level-seed" = "{setting.seed}", "enable-rcon" = "false" }

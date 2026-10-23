@@ -1,0 +1,4 @@
+target
+crates/archipel-ui/dist
+dev-data
+.git

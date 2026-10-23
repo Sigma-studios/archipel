@@ -1,0 +1,902 @@
+//! Running game servers: each one a process of its own user, in its own cgroup,
+//! its output in its console, its input from the console's command line.
+//!
+//! A server's life: `installing` (getting or updating its files) → `starting` →
+//! `running` (once its log says it is ready) → `stopping` → `stopped`; or `crashed`
+//! when it exits on its own or fails to install, after which it is started again
+//! unless it keeps crashing.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, anyhow, bail};
+use archipel_core::api::{ServerState, ServerUsage};
+use archipel_core::game::GameDef;
+use archipel_core::template::{self, Context as Ctx, Value};
+use parking_lot::Mutex;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, watch};
+use tracing::{info, warn};
+
+use crate::cgroups::Cgroups;
+use crate::config::Config;
+use crate::console::Console;
+use crate::files;
+use crate::fsops;
+use crate::games::Games;
+use crate::install::{Installed, Installer, RunAs};
+use crate::store::{ServerRow, Store};
+
+/// Crashes within this long count towards giving up.
+const CRASH_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Restarted after a crash, unless it crashed this many times in the window.
+const MAX_CRASHES: usize = 3;
+/// After its stop timeout, a server gets this long after SIGTERM, then is killed.
+const TERM_GRACE: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Status {
+    pub state: ServerState,
+    pub message: Option<String>,
+    pub started_at: Option<u64>,
+}
+
+pub struct Instance {
+    pub id: u64,
+    pub console: Console,
+    status: watch::Sender<Status>,
+    stdin: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    pid: Mutex<Option<i32>>,
+    cgroup: Mutex<Option<PathBuf>>,
+    /// Asked to stop: an exit now is not a crash.
+    stopping: AtomicBool,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    usage: Mutex<Option<ServerUsage>>,
+    last_cpu: Mutex<Option<(Instant, u64)>>,
+    crashes: Mutex<Vec<Instant>>,
+    /// Its memory while it runs, for quotas.
+    memory_mb: Mutex<u64>,
+    /// When its process last started (installs do not count).
+    spawned: Mutex<Option<Instant>>,
+}
+
+impl Instance {
+    pub fn status(&self) -> Status {
+        self.status.borrow().clone()
+    }
+
+    pub fn usage(&self) -> Option<ServerUsage> {
+        self.usage.lock().clone()
+    }
+
+    fn set(&self, state: ServerState, message: Option<String>) {
+        self.status.send_modify(|s| {
+            s.state = state;
+            s.message = message;
+            match state {
+                ServerState::Running if s.started_at.is_none() => {
+                    s.started_at = Some(archipel_core::now())
+                }
+                ServerState::Running => {}
+                _ => s.started_at = None,
+            }
+        });
+    }
+
+    fn is_active(&self) -> bool {
+        self.status.borrow().state.is_active()
+    }
+
+    async fn wait_inactive(&self, timeout: Duration) -> bool {
+        let mut rx = self.status.subscribe();
+        tokio::time::timeout(timeout, rx.wait_for(|s| !s.state.is_active()))
+            .await
+            .is_ok()
+    }
+}
+
+#[derive(Clone)]
+pub struct Supervisor(Arc<Inner>);
+
+struct Inner {
+    cfg: Config,
+    store: Arc<Store>,
+    games: Arc<Games>,
+    pub cgroups: Cgroups,
+    installer: Installer,
+    instances: Mutex<HashMap<u64, Arc<Instance>>>,
+    /// Bytes each server's files take, measured now and then.
+    disk: Mutex<HashMap<u64, u64>>,
+    shutting_down: AtomicBool,
+}
+
+impl Supervisor {
+    pub fn new(
+        cfg: Config,
+        store: Arc<Store>,
+        games: Arc<Games>,
+        cgroups: Cgroups,
+    ) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(cfg.logs_dir())?;
+        Ok(Supervisor(Arc::new(Inner {
+            installer: Installer::new(cfg.clone())?,
+            cfg,
+            store,
+            games,
+            cgroups,
+            instances: Default::default(),
+            disk: Default::default(),
+            shutting_down: AtomicBool::new(false),
+        })))
+    }
+
+    pub fn cgroups(&self) -> &Cgroups {
+        &self.0.cgroups
+    }
+
+    pub fn instance(&self, id: u64) -> Arc<Instance> {
+        self.0
+            .instances
+            .lock()
+            .entry(id)
+            .or_insert_with(|| {
+                let (status, _) = watch::channel(Status {
+                    state: ServerState::Stopped,
+                    message: None,
+                    started_at: None,
+                });
+                Arc::new(Instance {
+                    id,
+                    console: Console::new(self.0.cfg.logs_dir().join(format!("{id}.log"))),
+                    status,
+                    stdin: Mutex::new(None),
+                    pid: Mutex::new(None),
+                    cgroup: Mutex::new(None),
+                    stopping: AtomicBool::new(false),
+                    task: Mutex::new(None),
+                    usage: Mutex::new(None),
+                    last_cpu: Mutex::new(None),
+                    crashes: Mutex::new(Vec::new()),
+                    memory_mb: Mutex::new(0),
+                    spawned: Mutex::new(None),
+                })
+            })
+            .clone()
+    }
+
+    pub fn disk_bytes(&self, id: u64) -> Option<u64> {
+        self.0.disk.lock().get(&id).copied()
+    }
+
+    /// Memory held by active servers, by owner, and in all.
+    pub fn memory_in_use(&self) -> (HashMap<i64, u64>, u64) {
+        let rows = self.0.store.list_servers().unwrap_or_default();
+        let mut by_owner = HashMap::new();
+        let mut total = 0;
+        for row in rows {
+            let inst = self.instance(row.id);
+            if inst.is_active() {
+                let mb = *inst.memory_mb.lock();
+                *by_owner.entry(row.owner_id).or_default() += mb;
+                total += mb;
+            }
+        }
+        (by_owner, total)
+    }
+
+    /// Memory servers may have in all: the container's, less archipel's share.
+    pub fn memory_available_mb(&self) -> Option<u64> {
+        let (memory, _) = self.0.cgroups.totals();
+        memory.map(|b| (b / (1024 * 1024)).saturating_sub(self.0.cfg.reserve_mb))
+    }
+
+    /// Starts a server, if its owner's quota and the machine allow.
+    pub fn start(&self, id: u64) -> anyhow::Result<()> {
+        if self.0.shutting_down.load(Ordering::Relaxed) {
+            bail!("archipel is shutting down");
+        }
+        let row = self.0.store.get_server(id)?.context("no such server")?;
+        let game = self.game(&row)?;
+        let owner = self
+            .0
+            .store
+            .user_by_id(row.owner_id)?
+            .context("the server's owner is gone")?;
+        let inst = self.instance(id);
+        if inst.is_active() {
+            bail!("{} is already {}", row.name, inst.status().state);
+        }
+        game.settings_from(&row.settings).map_err(|e| anyhow!(e))?;
+        if row.memory_mb < game.memory.min_mb {
+            bail!("{} needs at least {} MB", game.name, game.memory.min_mb);
+        }
+        let (by_owner, total) = self.memory_in_use();
+        let mine = by_owner.get(&owner.id).copied().unwrap_or(0);
+        if mine + row.memory_mb > owner.quota.memory_mb {
+            bail!(
+                "this server needs {} MB, and {} MB of your {} MB are taken by running servers: \
+                 stop one, or give this one less memory",
+                row.memory_mb,
+                mine,
+                owner.quota.memory_mb
+            );
+        }
+        if let Some(available) = self.memory_available_mb()
+            && total + row.memory_mb > available
+        {
+            bail!(
+                "the machine has {} MB free for servers and this one needs {} MB: try again \
+                 when others stop",
+                available.saturating_sub(total),
+                row.memory_mb
+            );
+        }
+        let disk_mb = self.owner_disk_bytes(owner.id) / (1024 * 1024);
+        if disk_mb > owner.quota.disk_mb {
+            bail!(
+                "your servers' files take {disk_mb} MB, more than your {} MB: delete a server \
+                 or ask for more",
+                owner.quota.disk_mb
+            );
+        }
+        self.0.store.set_auto_start(id, true)?;
+        *inst.memory_mb.lock() = row.memory_mb;
+        inst.stopping.store(false, Ordering::Relaxed);
+        inst.set(ServerState::Installing, None);
+        let me = self.clone();
+        let task = tokio::spawn({
+            let inst = inst.clone();
+            async move { me.run(inst).await }
+        });
+        *inst.task.lock() = Some(task);
+        Ok(())
+    }
+
+    fn owner_disk_bytes(&self, owner: i64) -> u64 {
+        let rows = self.0.store.list_servers().unwrap_or_default();
+        let disk = self.0.disk.lock();
+        rows.iter()
+            .filter(|r| r.owner_id == owner)
+            .filter_map(|r| disk.get(&r.id))
+            .sum()
+    }
+
+    fn game(&self, row: &ServerRow) -> anyhow::Result<GameDef> {
+        self.0
+            .games
+            .get(&row.game)
+            .cloned()
+            .ok_or_else(|| anyhow!("archipel no longer knows the game {}", row.game))
+    }
+
+    /// Runs the server, again after crashes unless they keep coming.
+    async fn run(self, inst: Arc<Instance>) {
+        loop {
+            *inst.spawned.lock() = None;
+            let result = self.run_once(&inst).await;
+            *inst.pid.lock() = None;
+            *inst.stdin.lock() = None;
+            *inst.usage.lock() = None;
+            let procs = inst.cgroup.lock().take();
+            if let Some(procs) = procs {
+                self.0.cgroups.kill(&procs);
+                self.0.cgroups.remove(&procs).await;
+            }
+            if inst.stopping.load(Ordering::Relaxed) {
+                inst.console.system("stopped".into());
+                inst.set(ServerState::Stopped, None);
+                return;
+            }
+            let message = match result {
+                Ok(code) => format!("it exited on its own ({code})"),
+                Err(e) => format!("{e:#}"),
+            };
+            inst.console.system(message.clone());
+            let crashes = {
+                let mut c = inst.crashes.lock();
+                c.retain(|t| t.elapsed() < CRASH_WINDOW);
+                c.push(Instant::now());
+                c.len()
+            };
+            // A server that fails to install, or exits right after starting, will
+            // again.
+            let worth_it = inst
+                .spawned
+                .lock()
+                .is_some_and(|t| t.elapsed() > Duration::from_secs(30));
+            if !worth_it || crashes >= MAX_CRASHES {
+                inst.set(ServerState::Crashed, Some(message));
+                return;
+            }
+            inst.console.system("starting it again in 5 seconds".into());
+            inst.set(ServerState::Crashed, Some(message));
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if inst.stopping.load(Ordering::Relaxed) {
+                inst.set(ServerState::Stopped, None);
+                return;
+            }
+            inst.set(ServerState::Installing, None);
+        }
+    }
+
+    /// One run: install what is missing, write its files, start it and wait for it
+    /// to exit. Its exit status, or why it could not run.
+    async fn run_once(&self, inst: &Instance) -> anyhow::Result<String> {
+        let id = inst.id;
+        let row = self
+            .0
+            .store
+            .get_server(id)?
+            .context("the server was deleted")?;
+        let game = self.game(&row)?;
+        let owner = self
+            .0
+            .store
+            .user_by_id(row.owner_id)?
+            .context("the server's owner is gone")?;
+        let settings = game.settings_from(&row.settings).map_err(|e| anyhow!(e))?;
+        let dir = self.0.cfg.server_dir(id);
+        let uid = fsops::uid_of(id);
+        fsops::ensure_server_dir(&dir, uid).context("preparing the server's directory")?;
+        self.0.cgroups.ensure_user(owner.id, &owner.quota)?;
+        let procs = self.0.cgroups.create_server(owner.id, id, row.memory_mb)?;
+        *inst.cgroup.lock() = procs.clone();
+        let run_as = RunAs {
+            uid,
+            cgroup: procs.clone(),
+        };
+
+        inst.set(ServerState::Installing, None);
+        let installed: Option<Installed> = row
+            .installed
+            .as_deref()
+            .and_then(|i| serde_json::from_str(i).ok());
+        let ready = self
+            .0
+            .installer
+            .prepare(
+                &game,
+                &settings,
+                installed.as_ref(),
+                &dir,
+                &run_as,
+                &inst.console,
+            )
+            .await
+            .context("installing")?;
+        if ready.installed != installed {
+            let json = ready
+                .installed
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            self.0.store.set_installed(id, json.as_deref())?;
+        }
+
+        let ctx = context(
+            &game,
+            &row,
+            &settings,
+            &dir,
+            ready.java.as_deref(),
+            ready.base.as_deref(),
+        );
+        files::write_all(&game, &dir, uid, &ctx).await?;
+        let words: Vec<String> = game
+            .run
+            .command
+            .iter()
+            .map(|w| template::render(w, &ctx))
+            .collect::<Result<_, _>>()?;
+        let (program, args) = words.split_first().context("no command")?;
+        let program = if program.starts_with("./") {
+            dir.join(program.trim_start_matches("./"))
+        } else {
+            PathBuf::from(program)
+        };
+        let mut env: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in &game.run.env {
+            env.insert(k.clone(), template::render(v, &ctx)?);
+        }
+
+        inst.set(ServerState::Starting, None);
+        inst.console.system(format!(
+            "starting {} with {} MB of memory",
+            row.name, row.memory_mb
+        ));
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(args)
+            .current_dir(&dir)
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", &dir)
+            .env("LANG", "C.UTF-8")
+            .env("TERM", "dumb")
+            .envs(&env)
+            .stdin(Stdio::piped());
+        let mut child =
+            spawn(cmd, &run_as).with_context(|| format!("running {}", program.display()))?;
+        *inst.pid.lock() = child.id().map(|p| p as i32);
+        *inst.spawned.lock() = Some(Instant::now());
+
+        // The console's command line.
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        *inst.stdin.lock() = Some(tx);
+        if let Some(mut stdin) = child.stdin.take() {
+            tokio::spawn(async move {
+                while let Some(line) = rx.recv().await {
+                    if stdin
+                        .write_all(format!("{line}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                }
+            });
+        }
+        let ready_text = game.run.ready.clone();
+        if ready_text.is_none() {
+            inst.set(ServerState::Running, None);
+        }
+        let readers = pipe_output(
+            child.stdout.take(),
+            child.stderr.take(),
+            inst.console.clone(),
+            {
+                let status = inst.status.clone();
+                let console = inst.console.clone();
+                move |line: &str| {
+                    if let Some(text) = &ready_text
+                        && line.contains(text.as_str())
+                        && status.borrow().state == ServerState::Starting
+                    {
+                        status.send_modify(|s| {
+                            s.state = ServerState::Running;
+                            s.started_at = Some(archipel_core::now());
+                        });
+                        console.system("ready".into());
+                    }
+                }
+            },
+        );
+        let status = child.wait().await?;
+        readers.await;
+        Ok(match status.code() {
+            Some(code) => format!("code {code}"),
+            None => "killed".into(),
+        })
+    }
+
+    /// Says why a server could not start.
+    pub fn not_started(&self, id: u64, why: &anyhow::Error) {
+        let inst = self.instance(id);
+        inst.console.system(format!("not started: {why:#}"));
+        inst.set(ServerState::Stopped, Some(format!("not started: {why:#}")));
+    }
+
+    /// Stops a server cleanly: its stop command or signal, then SIGTERM, then
+    /// SIGKILL. `by_owner`: it stays stopped when archipel restarts.
+    pub async fn stop(&self, id: u64, by_owner: bool) -> anyhow::Result<()> {
+        if by_owner {
+            self.0.store.set_auto_start(id, false)?;
+        }
+        let inst = self.instance(id);
+        inst.stopping.store(true, Ordering::Relaxed);
+        if !inst.is_active() {
+            // A crashed server waiting to start again stays down.
+            if inst.status().state == ServerState::Crashed {
+                inst.set(ServerState::Stopped, inst.status().message);
+            }
+            return Ok(());
+        }
+        let row = self.0.store.get_server(id)?.context("no such server")?;
+        let game = self.game(&row)?;
+        inst.set(ServerState::Stopping, None);
+        let pid = *inst.pid.lock();
+        let Some(pid) = pid else {
+            // Installing: no server yet, just its install, which goes.
+            let task = inst.task.lock().take();
+            if let Some(task) = task {
+                task.abort();
+            }
+            let procs = inst.cgroup.lock().take();
+            if let Some(procs) = procs {
+                self.0.cgroups.kill(&procs);
+                self.0.cgroups.remove(&procs).await;
+            }
+            inst.console.system("install stopped".into());
+            inst.set(ServerState::Stopped, None);
+            return Ok(());
+        };
+        inst.console.system("stopping".into());
+        match (&game.run.stop_command, &game.run.stop_signal) {
+            (Some(command), _) => {
+                let tx = inst.stdin.lock().clone();
+                if let Some(tx) = tx {
+                    let _ = tx.send(command.clone());
+                }
+            }
+            (None, Some(signal)) => signal_group(pid, parse_signal(signal)),
+            (None, None) => signal_group(pid, libc::SIGTERM),
+        }
+        let timeout = Duration::from_secs(u64::from(game.run.stop_timeout_secs));
+        if inst.wait_inactive(timeout).await {
+            return Ok(());
+        }
+        inst.console.system(format!(
+            "it did not stop within {}s: terminating it",
+            timeout.as_secs()
+        ));
+        signal_group(pid, libc::SIGTERM);
+        if inst.wait_inactive(TERM_GRACE).await {
+            return Ok(());
+        }
+        inst.console.system("killing it".into());
+        signal_group(pid, libc::SIGKILL);
+        let procs = inst.cgroup.lock().clone();
+        if let Some(procs) = procs {
+            self.0.cgroups.kill(&procs);
+        }
+        inst.wait_inactive(Duration::from_secs(10)).await;
+        Ok(())
+    }
+
+    pub async fn restart(&self, id: u64) -> anyhow::Result<()> {
+        self.stop(id, false).await?;
+        self.start(id)
+    }
+
+    /// Types a line into the server's console.
+    pub fn send(&self, id: u64, line: &str) -> anyhow::Result<()> {
+        let inst = self.instance(id);
+        let tx = inst.stdin.lock().clone();
+        let Some(tx) = tx else {
+            bail!("the server is not running");
+        };
+        if line.contains(['\n', '\r']) {
+            bail!("one line at a time");
+        }
+        inst.console.line(format!("> {line}"));
+        tx.send(line.to_string())
+            .map_err(|_| anyhow!("the server is not reading its console"))
+    }
+
+    /// Stops a server and deletes its files.
+    pub async fn delete(&self, id: u64) -> anyhow::Result<()> {
+        self.stop(id, true).await?;
+        let dir = self.0.cfg.server_dir(id);
+        if dir.exists() {
+            // Does not follow links, so nothing outside the directory goes.
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await??;
+        }
+        let _ = std::fs::remove_file(self.0.cfg.logs_dir().join(format!("{id}.log")));
+        let _ = std::fs::remove_file(self.0.cfg.logs_dir().join(format!("{id}.log.1")));
+        self.0.instances.lock().remove(&id);
+        self.0.disk.lock().remove(&id);
+        Ok(())
+    }
+
+    /// Forgets what a server's files were installed from: its next start installs
+    /// them again (a game update).
+    pub fn reinstall(&self, id: u64) -> anyhow::Result<()> {
+        if self.instance(id).is_active() {
+            bail!("stop the server first");
+        }
+        self.0.store.set_installed(id, None)?;
+        self.instance(id)
+            .console
+            .system("its game files will be installed again at the next start".into());
+        Ok(())
+    }
+
+    /// Starts the servers that were running when archipel last stopped.
+    pub fn start_saved(&self) {
+        for row in self.0.store.list_servers().unwrap_or_default() {
+            if row.auto_start
+                && let Err(e) = self.start(row.id)
+            {
+                warn!(server = row.id, "not started again: {e:#}");
+                self.instance(row.id)
+                    .console
+                    .system(format!("not started again: {e:#}"));
+            }
+        }
+    }
+
+    /// Stops every server, for archipel's own shutdown: they start again next time.
+    pub async fn shutdown(&self) {
+        self.0.shutting_down.store(true, Ordering::Relaxed);
+        let ids: Vec<u64> = self
+            .0
+            .instances
+            .lock()
+            .values()
+            .filter(|i| i.is_active())
+            .map(|i| i.id)
+            .collect();
+        info!("stopping {} servers", ids.len());
+        let stops = ids.into_iter().map(|id| {
+            let me = self.clone();
+            async move {
+                if let Err(e) = me.stop(id, false).await {
+                    warn!(server = id, "stopping: {e:#}");
+                }
+            }
+        });
+        futures_util::future::join_all(stops).await;
+    }
+
+    /// Measures servers now and then: memory and CPU every few seconds, disk use
+    /// every few minutes.
+    pub async fn measure(self) {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut rounds: u64 = 0;
+        loop {
+            tick.tick().await;
+            if rounds.is_multiple_of(120) {
+                self.measure_disks().await;
+            }
+            rounds += 1;
+            let instances: Vec<Arc<Instance>> = self.0.instances.lock().values().cloned().collect();
+            for inst in instances {
+                let procs = inst.cgroup.lock().clone();
+                let Some(procs) = procs.filter(|_| inst.pid.lock().is_some()) else {
+                    continue;
+                };
+                let Some((memory, cpu_usec)) = self.0.cgroups.stats(&procs) else {
+                    continue;
+                };
+                let now = Instant::now();
+                let cpu_percent = match inst.last_cpu.lock().replace((now, cpu_usec)) {
+                    Some((then, before)) => {
+                        let wall = now.duration_since(then).as_micros().max(1) as f64;
+                        (cpu_usec.saturating_sub(before) as f64 / wall * 100.0) as f32
+                    }
+                    None => 0.0,
+                };
+                *inst.usage.lock() = Some(ServerUsage {
+                    memory_bytes: memory,
+                    cpu_percent,
+                });
+            }
+        }
+    }
+
+    async fn measure_disks(&self) {
+        let rows = self.0.store.list_servers().unwrap_or_default();
+        for row in rows {
+            let dir = self.0.cfg.server_dir(row.id);
+            if let Ok(bytes) = tokio::task::spawn_blocking(move || fsops::disk_usage(&dir)).await {
+                self.0.disk.lock().insert(row.id, bytes);
+            }
+        }
+    }
+
+    /// Makes running servers' files whole for a backup: their game's `before`
+    /// commands, waiting for the line saying they are done.
+    pub async fn before_backup(&self) -> Vec<String> {
+        self.backup_step(true).await
+    }
+
+    pub async fn after_backup(&self) -> Vec<String> {
+        self.backup_step(false).await
+    }
+
+    async fn backup_step(&self, before: bool) -> Vec<String> {
+        let mut problems = Vec::new();
+        for row in self.0.store.list_servers().unwrap_or_default() {
+            let inst = self.instance(row.id);
+            if inst.status().state != ServerState::Running {
+                continue;
+            }
+            let Some(backup) = self.game(&row).ok().and_then(|g| g.backup) else {
+                continue;
+            };
+            let commands = if before {
+                &backup.before
+            } else {
+                &backup.after
+            };
+            if commands.is_empty() {
+                continue;
+            }
+            let mut rx = inst.console.subscribe();
+            for command in commands {
+                if let Err(e) = self.send(row.id, command) {
+                    problems.push(format!("{}: {e:#}", row.name));
+                }
+            }
+            if let (true, Some(text)) = (before, &backup.wait_for) {
+                let waited = tokio::time::timeout(Duration::from_secs(120), async {
+                    while let Ok(line) = rx.recv().await {
+                        if line.contains(text.as_str()) {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .await;
+                if !matches!(waited, Ok(true)) {
+                    problems.push(format!("{}: did not confirm it saved", row.name));
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// What a server's templates may use.
+pub fn context(
+    game: &GameDef,
+    row: &ServerRow,
+    settings: &BTreeMap<String, Value>,
+    dir: &Path,
+    java: Option<&Path>,
+    base: Option<&Path>,
+) -> Ctx {
+    let mut ctx = Ctx::new();
+    for port in &game.ports {
+        if let Some(p) = row.ports.get(&port.name) {
+            ctx.insert(format!("port.{}", port.name), Value::Number(i64::from(*p)));
+        }
+    }
+    for (k, v) in settings {
+        ctx.insert(format!("setting.{k}"), v.clone());
+    }
+    let memory = row.memory_mb as i64;
+    ctx.insert("memory_mb".into(), Value::Number(memory));
+    // The JVM needs room of its own beside its heap.
+    ctx.insert(
+        "java_memory_mb".into(),
+        Value::Number((memory - (memory / 4).max(256)).max(256)),
+    );
+    ctx.insert("dir".into(), Value::Text(dir.display().to_string()));
+    ctx.insert(
+        "base".into(),
+        Value::Text(base.map(|b| b.display().to_string()).unwrap_or_default()),
+    );
+    ctx.insert(
+        "java".into(),
+        Value::Text(
+            java.map(|j| j.display().to_string())
+                .unwrap_or_else(|| "java".into()),
+        ),
+    );
+    ctx
+}
+
+/// Spawns `cmd` as the server's user, in its cgroup, in a session of its own
+/// (so signals reach everything it starts).
+fn spawn(
+    mut cmd: tokio::process::Command,
+    run_as: &RunAs,
+) -> anyhow::Result<tokio::process::Child> {
+    let procs = run_as
+        .cgroup
+        .as_ref()
+        .map(|p| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()))
+        .transpose()?;
+    let uid = run_as.uid;
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // SAFETY: between fork and exec only async-signal-safe calls are made, on data
+    // prepared before the fork.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if let Some(procs) = &procs {
+                // Writing 0 moves the writer itself.
+                let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                if fd < 0 || libc::write(fd, c"0".as_ptr().cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(fd);
+            }
+            // If memory runs out, servers go before archipel.
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd >= 0 {
+                libc::write(fd, c"500".as_ptr().cast(), 3);
+                libc::close(fd);
+            }
+            // Its own user last: joining the cgroup takes root. (std's `uid` would
+            // switch before these closures run.)
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setgid(uid) != 0
+                || libc::setuid(uid) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(cmd.spawn()?)
+}
+
+/// Copies a child's stdout and stderr into the console, line by line, showing
+/// each to `watch`. The returned future ends with them.
+fn pipe_output(
+    out: Option<tokio::process::ChildStdout>,
+    err: Option<tokio::process::ChildStderr>,
+    console: Console,
+    watch: impl Fn(&str) + Send + Sync + 'static,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let watch = Arc::new(watch);
+    let mut tasks = Vec::new();
+    if let Some(out) = out {
+        let (console, watch) = (console.clone(), watch.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(out).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                watch(&line);
+                console.line(line);
+            }
+        }));
+    }
+    if let Some(err) = err {
+        tasks.push(tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(err).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                watch(&line);
+                console.line(line);
+            }
+        }));
+    }
+    async move {
+        for t in tasks {
+            let _ = t.await;
+        }
+    }
+}
+
+/// Runs an install step's command (SteamCMD) as the server's user, its output in
+/// the console. Fails on a non-zero exit.
+pub async fn run_logged(
+    cmd: tokio::process::Command,
+    run_as: &RunAs,
+    console: &Console,
+) -> anyhow::Result<()> {
+    let mut child = spawn(cmd, run_as)?;
+    let readers = pipe_output(
+        child.stdout.take(),
+        child.stderr.take(),
+        console.clone(),
+        |_| {},
+    );
+    let status = child.wait().await?;
+    readers.await;
+    if !status.success() {
+        bail!("exited with {status}");
+    }
+    Ok(())
+}
+
+fn signal_group(pid: i32, signal: i32) {
+    // SAFETY: a plain kill(2) to the process group the server leads.
+    unsafe {
+        libc::kill(-pid, signal);
+    }
+}
+
+fn parse_signal(name: &str) -> i32 {
+    match name.trim_start_matches("SIG") {
+        "INT" => libc::SIGINT,
+        "QUIT" => libc::SIGQUIT,
+        "HUP" => libc::SIGHUP,
+        "USR1" => libc::SIGUSR1,
+        "USR2" => libc::SIGUSR2,
+        "KILL" => libc::SIGKILL,
+        _ => libc::SIGTERM,
+    }
+}
