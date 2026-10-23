@@ -188,6 +188,24 @@ pub struct About {
     pub version: String,
 }
 
+/// Whether this computer can receive games from the internet (the desktop app):
+/// checked when it opens by asking the router for a test forwarding, and again
+/// as servers start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Internet {
+    pub state: ReachState,
+    /// This computer's address on the home network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<String>,
+    /// Where the internet sees it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ip: Option<String>,
+    /// The port pool, to forward by hand when the router will not: `30000-30019`.
+    pub ports: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Whether a running server can be reached from the internet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reach {

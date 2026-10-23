@@ -80,7 +80,9 @@ and the same UI, in a window, for the one person using the computer:
 * **No limits, no quotas.** A server's memory is what its game is given (Minecraft's
   Java heap). Servers start when asked, never by themselves: not at login, not when
   the app opens. Closing the window stops them, once confirmed (worlds are saved).
-* **Ports on the router.** When a server starts, archipel asks the home router to
+* **Ports on the router.** When the app opens, archipel asks the router for a test
+  forwarding, and the home page says whether friends could join at all. When a
+  server starts, archipel asks the home router to
   forward its ports (NAT-PMP, then UPnP), renews that while it runs and takes it back
   when it stops. The server page then says who can join: anyone (with the address
   to share), only the home network (with the ports to forward by hand, if the router
@@ -91,7 +93,9 @@ and the same UI, in a window, for the one person using the computer:
   the system's: not your home folder, not the other servers. Without Landlock they
   run anyway, and their console says they are not confined.
 
-Its data is in `~/.local/share/archipel`. SteamCMD (Puck) needs 32-bit libraries on
+Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
+the games archipel downloads (Java, SteamCMD, Urban Terror) are built for usual
+distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`. SteamCMD (Puck) needs 32-bit libraries on
 x86_64 (`lib32gcc-s1` on Debian and Ubuntu); Urban Terror and Puck need x86_64.
 
 ## How servers are kept apart

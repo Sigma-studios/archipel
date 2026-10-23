@@ -262,6 +262,32 @@ impl Supervisor {
         self.0.reacher.as_ref()
     }
 
+    /// On the desktop, finds out (in the background) whether friends could reach
+    /// this computer, with a port of the pool no server has.
+    pub fn check_internet(&self) {
+        let Some(reacher) = self.0.reacher.clone() else {
+            return;
+        };
+        let Ok((first, last)) = self.0.cfg.port_range() else {
+            return;
+        };
+        let taken: std::collections::HashSet<u16> = self
+            .0
+            .store
+            .list_servers()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|r| r.ports.values().copied())
+            .collect();
+        // A server's port stays forwarded for it.
+        let (port, keep) = match (first..=last).rev().find(|p| !taken.contains(p)) {
+            Some(port) => (port, false),
+            None => (first, true),
+        };
+        reacher.checking();
+        tokio::spawn(async move { reacher.check(port, keep).await });
+    }
+
     /// Whether the owner's quota and the machine leave room for the server.
     fn admit(&self, row: &ServerRow, owner: &crate::store::UserRow) -> anyhow::Result<()> {
         let (by_owner, total) = self.memory_in_use();
@@ -468,7 +494,7 @@ impl Supervisor {
         cmd.args(args)
             .current_dir(&dir)
             .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("PATH", crate::fsops::servers_path())
             .env("HOME", &dir)
             .env("LANG", "C.UTF-8")
             .env("TERM", "dumb")
@@ -1002,7 +1028,46 @@ fn spawn(
             Ok(())
         });
     }
-    Ok(cmd.spawn()?)
+    let program = PathBuf::from(cmd.as_std().get_program());
+    cmd.spawn().map_err(|e| match e.kind() {
+        // The file is there, yet "not found": its ELF interpreter is not.
+        std::io::ErrorKind::NotFound if program.is_file() => anyhow!(
+            "{} cannot run on this system: it is built for usual Linux distributions, \
+             and the loader it needs ({}) is missing. On NixOS, turn on programs.nix-ld \
+             (or open archipel with appimage-run)",
+            program.display(),
+            elf_interpreter(&program).unwrap_or_else(|| "/lib64/ld-linux-x86-64.so.2".into())
+        ),
+        _ => e.into(),
+    })
+}
+
+/// The dynamic loader an ELF program asks for (its `PT_INTERP`), if it says.
+fn elf_interpreter(program: &Path) -> Option<String> {
+    let bytes = std::fs::read(program).ok()?;
+    if bytes.get(..4)? != b"\x7fELF" || *bytes.get(4)? != 2 {
+        return None; // not a 64-bit ELF (a script: its interpreter is on the first line)
+    }
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+    let u64_at = |at: usize| Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?));
+    let (phoff, phentsize, phnum) = (
+        u64_at(0x20)? as usize,
+        u16_at(0x36)? as usize,
+        u16_at(0x38)?,
+    );
+    (0..phnum as usize).find_map(|i| {
+        let h = phoff + i * phentsize;
+        if u32::from_le_bytes(bytes.get(h..h + 4)?.try_into().ok()?) != 3 {
+            return None;
+        }
+        let (off, size) = (u64_at(h + 8)? as usize, u64_at(h + 32)? as usize);
+        let path = bytes.get(off..off + size)?;
+        Some(
+            String::from_utf8_lossy(path)
+                .trim_end_matches('\0')
+                .to_string(),
+        )
+    })
 }
 
 /// Copies a child's stdout and stderr into the console, line by line, showing
@@ -1133,5 +1198,20 @@ fn parse_signal(name: &str) -> i32 {
         "USR2" => libc::SIGUSR2,
         "KILL" => libc::SIGKILL,
         _ => libc::SIGTERM,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_programs_loader() {
+        let loader = elf_interpreter(Path::new("/bin/ls")).expect("ls has a loader");
+        assert!(
+            loader.starts_with('/') && loader.contains("ld-"),
+            "{loader}"
+        );
+        assert_eq!(elf_interpreter(Path::new("/etc/hostname")), None);
     }
 }

@@ -53,6 +53,8 @@ does); `local` is the address on the home network, `detail` what went wrong.
 | | | |
 |---|---|---|
 | `GET /api/overview` | | `Overview` (any user may read it) |
+| `GET /api/internet` | | `Internet` (desktop app): whether friends could reach this computer, from a test forwarding asked of the router when the app opens; 404 hosted |
+| `POST /api/internet/check` | | `Internet`, `checking` until the new check is done |
 | `GET /api/users` | | `Vec<UserView>` |
 | `POST /api/users` | `CreateUser` | `UserView` |
 | `PUT /api/users/{username}` | `UpdateUser` | `UserView` |

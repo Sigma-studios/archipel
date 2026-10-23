@@ -97,12 +97,30 @@ pub fn ensure_server_dir(dir: &Path, uid: u32) -> io::Result<()> {
     if !dir.exists() {
         std::fs::create_dir(dir)?;
     }
-    chown(dir, uid)?;
+    // On the desktop it is already the user's, whose group may be another number
+    // (or, in a user namespace, not even exist).
+    if !servers_run_as_self() {
+        chown(dir, uid)?;
+    }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
 fn chown(path: &Path, uid: u32) -> io::Result<()> {
     std::os::unix::fs::chown(path, Some(uid), Some(uid))
+}
+
+/// The `PATH` servers get: the system's, or on the desktop the app's own (NixOS
+/// keeps programs elsewhere).
+pub fn servers_path() -> String {
+    const SYSTEM: &str = "/usr/local/bin:/usr/bin:/bin";
+    if servers_run_as_self() {
+        std::env::var("PATH")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| SYSTEM.into())
+    } else {
+        SYSTEM.into()
+    }
 }
 
 /// `relative` under `dir`, refusing paths that leave it.

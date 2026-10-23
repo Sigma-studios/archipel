@@ -61,6 +61,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/servers/{id}/console/lines", get(console_lines))
         .route("/api/servers/{id}/files", get(list_files).put(save_file))
         .route("/api/overview", get(overview))
+        .route("/api/internet", get(internet))
+        .route("/api/internet/check", post(check_internet))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{username}",
@@ -956,6 +958,29 @@ async fn overview(State(app): S, _: Caller) -> ApiResult<Json<Overview>> {
         servers: rows.len() as u32,
         running,
     }))
+}
+
+/// Whether friends could reach this computer (the desktop app).
+async fn internet(State(app): S, _: Caller) -> ApiResult<Json<Internet>> {
+    let reacher = app
+        .supervisor
+        .reacher()
+        .ok_or_else(|| not_found("only the desktop app opens ports on a router"))?;
+    let status = reacher.machine();
+    let (first, last) = app.cfg.port_range()?;
+    Ok(Json(Internet {
+        state: status.state,
+        local_ip: status.local_ip.map(|ip| ip.to_string()),
+        public_ip: status.public_ip.map(|ip| ip.to_string()),
+        ports: format!("{first}-{last}"),
+        detail: status.detail,
+    }))
+}
+
+async fn check_internet(State(app): S, caller: Caller) -> ApiResult<Json<Internet>> {
+    // It says `checking` until done.
+    app.supervisor.check_internet();
+    internet(State(app), caller).await
 }
 
 /// Total and used bytes of the filesystem holding `path`.

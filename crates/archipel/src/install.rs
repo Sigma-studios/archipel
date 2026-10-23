@@ -438,7 +438,7 @@ impl Installer {
                 .current_dir(&steamcmd)
                 .env_clear()
                 .env("HOME", dir)
-                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .env("PATH", crate::fsops::servers_path())
                 .env("LANG", "C.UTF-8");
             last = crate::supervisor::run_logged(cmd, run_as, console).await;
             match &last {

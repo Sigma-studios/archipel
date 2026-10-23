@@ -1,4 +1,4 @@
-use archipel_core::api::{Reach, ReachState, ServerState, ServerView, UserView};
+use archipel_core::api::{Internet, Reach, ReachState, ServerState, ServerView, UserView};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -379,5 +379,77 @@ pub fn Loading() -> impl IntoView {
             <span class="spinner" aria-hidden="true"></span>
             "Loading…"
         </div>
+    }
+}
+
+/// Whether friends could reach this PC at all (desktop app), on the home page:
+/// archipel checks with the router when it opens, before any server runs.
+#[component]
+pub fn InternetCard() -> impl IntoView {
+    let internet = crate::util::polled(Some(std::time::Duration::from_secs(4)), || async {
+        api::get::<Internet>("/api/internet").await
+    });
+    let check = move |_| {
+        spawn_local(async move {
+            match api::act_json::<Internet>("/api/internet/check").await {
+                Ok(i) => internet.data.set(Some(i)),
+                Err(e) => toasts().err(e),
+            }
+        });
+    };
+    view! {
+        <Show when=move || internet.loaded()>
+            {move || {
+                let i = internet.data.get().expect("loaded");
+                let checking = i.state == ReachState::Checking;
+                let this_pc = i
+                    .local_ip
+                    .as_deref()
+                    .map(|ip| format!(" ({ip})"))
+                    .unwrap_or_default();
+                let detail = i.detail.clone().map(|d| view! { <div class="small reach-detail">{d}</div> });
+                let (class, title, body) = match i.state {
+                    ReachState::Checking => (
+                        "note reach-panel",
+                        "Checking whether friends can reach this PC…".to_string(),
+                        "archipel is asking your router to open a test port.".to_string(),
+                    ),
+                    ReachState::Internet => (
+                        "note note-good reach-panel",
+                        "✓ Friends can join from the internet".to_string(),
+                        format!(
+                            "Your router opens ports for archipel by itself{}. Each server's page gives the address to share.",
+                            i.public_ip.as_deref().map(|ip| format!(" (your public address is {ip})")).unwrap_or_default()
+                        ),
+                    ),
+                    ReachState::LocalOnly => (
+                        "note note-warning reach-panel",
+                        "⚠ Only your home network can join".to_string(),
+                        format!(
+                            "Your router did not open a port for archipel. To let friends in, turn on UPnP (or NAT-PMP) in your router's settings, or forward ports {} (TCP and UDP) to this PC{this_pc}.",
+                            i.ports
+                        ),
+                    ),
+                    ReachState::NoPublicAddress => (
+                        "note note-warning reach-panel",
+                        "⚠ Friends outside can't join from this connection".to_string(),
+                        "Your internet provider shares your public address with other customers, or another router sits in front of yours: no setting on your router can let friends in. Players on your home network can still join. Ask your provider for a public IPv4 address of your own.".to_string(),
+                    ),
+                };
+                view! {
+                    <section class=format!("{class} internet-card") role="status" aria-live="polite">
+                        <strong>
+                            {checking.then(|| view! { <span class="spinner spinner-sm" aria-hidden="true"></span>" " })}
+                            {title}
+                        </strong>
+                        <p>{body}</p>
+                        {detail}
+                        <button class="button button-small" on:click=check disabled=checking>
+                            "Check again"
+                        </button>
+                    </section>
+                }
+            }}
+        </Show>
     }
 }

@@ -60,6 +60,9 @@ struct Entry {
 pub struct Reacher {
     http: reqwest::Client,
     servers: Mutex<HashMap<u64, Entry>>,
+    /// The computer's, from the last check or server start.
+    machine: Mutex<Status>,
+    check_lock: tokio::sync::Mutex<()>,
     public: tokio::sync::Mutex<Option<(Instant, Option<IpAddr>)>>,
 }
 
@@ -70,12 +73,72 @@ impl Reacher {
                 .timeout(Duration::from_secs(5))
                 .build()?,
             servers: Default::default(),
+            machine: Mutex::new(Status {
+                state: ReachState::Checking,
+                local_ip: local_ip(),
+                public_ip: None,
+                detail: None,
+            }),
+            check_lock: Default::default(),
             public: Default::default(),
         }))
     }
 
     pub fn status(&self, server: u64) -> Option<Status> {
         self.servers.lock().get(&server).map(|e| e.status.clone())
+    }
+
+    /// Whether this computer can receive games from the internet, as last seen.
+    pub fn machine(&self) -> Status {
+        self.machine.lock().clone()
+    }
+
+    /// Says a check is coming, before it starts in the background.
+    pub fn checking(&self) {
+        self.machine.lock().state = ReachState::Checking;
+    }
+
+    /// Finds out whether the internet can reach this computer: asks the router to
+    /// forward `port` (one no server uses), then takes it back unless `keep`.
+    pub async fn check(&self, port: u16, keep: bool) {
+        let Ok(_one) = self.check_lock.try_lock() else {
+            return;
+        };
+        *self.public.lock().await = None;
+        let (status, via) = self.assess(&[port]).await;
+        info!(?status.state, detail = ?status.detail, "this computer's reachability");
+        if let (Some(via), false) = (&via, keep) {
+            withdraw(via, &[port]).await;
+        }
+        *self.machine.lock() = status;
+    }
+
+    /// Forwards `ports` if the router will, and says who can reach them.
+    async fn assess(&self, ports: &[u16]) -> (Status, Option<Via>) {
+        let local_ip = local_ip();
+        let public_ip = self.public_ip().await;
+        match local_ip {
+            None => (
+                Status {
+                    state: ReachState::LocalOnly,
+                    local_ip,
+                    public_ip,
+                    detail: Some("this computer is not on a network".into()),
+                },
+                None,
+            ),
+            // Its own address is the public one (no router in between): nothing to do.
+            Some(ip) if public_ip == Some(IpAddr::V4(ip)) => (
+                Status {
+                    state: ReachState::Internet,
+                    local_ip,
+                    public_ip,
+                    detail: None,
+                },
+                None,
+            ),
+            Some(ip) => forward(ip, ports, public_ip).await,
+        }
     }
 
     /// Opens a starting server's ports (TCP and UDP each: games use either or
@@ -96,30 +159,9 @@ impl Reacher {
                 local_ip,
             },
         );
-        let public_ip = self.public_ip().await;
-        let (status, via) = match local_ip {
-            None => (
-                Status {
-                    state: ReachState::LocalOnly,
-                    local_ip,
-                    public_ip,
-                    detail: Some("this computer is not on a network".into()),
-                },
-                None,
-            ),
-            // Its own address is the public one (no router in between): nothing to do.
-            Some(ip) if public_ip == Some(IpAddr::V4(ip)) => (
-                Status {
-                    state: ReachState::Internet,
-                    local_ip,
-                    public_ip,
-                    detail: None,
-                },
-                None,
-            ),
-            Some(ip) => forward(ip, &ports, public_ip).await,
-        };
+        let (status, via) = self.assess(&ports).await;
         info!(server, ?status.state, "reachability");
+        *self.machine.lock() = status.clone();
         if let Some(entry) = self.servers.lock().get_mut(&server) {
             entry.status = status;
             entry.via = via;

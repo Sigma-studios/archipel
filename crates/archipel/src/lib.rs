@@ -83,6 +83,7 @@ pub async fn build(cfg: config::Config) -> anyhow::Result<Built> {
         Mode::Desktop => api::ensure_owner(&app)?,
     }
     tokio::spawn(supervisor.clone().measure());
+    supervisor.check_internet();
     Ok(Built { app, supervisor })
 }
 

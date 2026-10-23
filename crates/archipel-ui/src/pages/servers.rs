@@ -6,8 +6,8 @@ use leptos::prelude::*;
 
 use crate::api;
 use crate::components::{
-    ConnectAddress, ErrorNote, GameBadge, Loading, Meter, PowerButton, QuotaMeters, ReachSummary,
-    StateBadge,
+    ConnectAddress, ErrorNote, GameBadge, InternetCard, Loading, Meter, PowerButton, QuotaMeters,
+    ReachSummary, StateBadge,
 };
 use crate::util::{Polled, bytes, desktop, is_admin, mb, percent, polled, use_me};
 
@@ -83,6 +83,10 @@ pub fn Servers() -> impl IntoView {
                     "New server"
                 </a>
             </header>
+
+            <Show when=desktop>
+                <InternetCard/>
+            </Show>
 
             <Show when=move || me.loaded()>
                 <section class="card quota-card" aria-labelledby="quota-title">
