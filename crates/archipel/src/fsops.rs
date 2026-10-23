@@ -5,15 +5,41 @@
 //! archipel read or write anything else. So file work happens on a thread whose
 //! filesystem identity (`setfsuid`) is the server's user, which drops root's
 //! file powers for that thread: the kernel checks every path as that user.
+//!
+//! On the desktop, servers run as the person using the computer, whose files a
+//! link could lead to: file work happens on a thread kept by Landlock to archipel's
+//! servers and downloads instead.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::sandbox::Sandbox;
+
 /// First uid (and gid) given to servers: server `n` runs as `UID_BASE + n`.
 pub const UID_BASE: u32 = 20000;
 
+/// Set on the desktop: every server runs as the user running archipel, kept to
+/// its own files by Landlock instead (see [`crate::sandbox`]).
+static OWN_USER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+/// On the desktop, what file work is kept to (nothing without Landlock).
+static FILE_WORK: std::sync::OnceLock<Option<Sandbox>> = std::sync::OnceLock::new();
+
+pub fn run_servers_as_self(file_work: Option<Sandbox>) {
+    // SAFETY: getuid cannot fail.
+    let _ = OWN_USER.set(unsafe { libc::getuid() });
+    let _ = FILE_WORK.set(file_work);
+}
+
+/// Whether servers run as archipel's own user (the desktop).
+pub fn servers_run_as_self() -> bool {
+    OWN_USER.get().is_some()
+}
+
 pub fn uid_of(server: u64) -> u32 {
-    UID_BASE + server as u32
+    match OWN_USER.get() {
+        Some(uid) => *uid,
+        None => UID_BASE + server as u32,
+    }
 }
 
 /// Runs `work` with the filesystem identity of `uid`.
@@ -25,7 +51,12 @@ where
     tokio::task::spawn_blocking(move || {
         // A thread of its own: its identity changes for good.
         std::thread::spawn(move || {
-            become_user(uid)?;
+            match FILE_WORK.get() {
+                // SAFETY: a ruleset, applied to this thread alone.
+                Some(Some(sandbox)) => unsafe { crate::sandbox::enter(sandbox.raw_fd())? },
+                Some(None) => {}
+                None => become_user(uid)?,
+            }
             work()
         })
         .join()

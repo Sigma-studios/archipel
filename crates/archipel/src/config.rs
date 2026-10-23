@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
+use archipel_core::api::Mode;
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct Config {
@@ -28,9 +29,35 @@ pub struct Config {
     /// is printed and saved in <data>/initial-admin-password).
     #[arg(long, env = "ARCHIPEL_ADMIN_PASSWORD", hide_env_values = true)]
     pub admin_password: Option<String>,
+    /// Desktop mode: one owner, no login, no limits, ports opened on the router.
+    /// The desktop app sets it; on its own it serves over HTTP, for development
+    /// only (keep `--listen` on 127.0.0.1: there is no login).
+    #[arg(long, env = "ARCHIPEL_DESKTOP", hide = true)]
+    pub desktop: bool,
 }
 
 impl Config {
+    pub fn mode(&self) -> Mode {
+        if self.desktop {
+            Mode::Desktop
+        } else {
+            Mode::Hosted
+        }
+    }
+
+    /// The desktop app's settings: its data in `data_dir`, the usual port pool.
+    pub fn desktop(data_dir: PathBuf) -> Self {
+        Config {
+            data_dir,
+            listen: "127.0.0.1:7810".parse().expect("an address"),
+            ports: "30000-30019".into(),
+            public_host: None,
+            reserve_mb: 0,
+            admin_password: None,
+            desktop: true,
+        }
+    }
+
     /// The port pool, first and last.
     pub fn port_range(&self) -> anyhow::Result<(u16, u16)> {
         let (a, b) = self

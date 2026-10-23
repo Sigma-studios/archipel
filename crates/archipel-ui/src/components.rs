@@ -1,4 +1,4 @@
-use archipel_core::api::{ServerState, ServerView, UserView};
+use archipel_core::api::{Reach, ReachState, ServerState, ServerView, UserView};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -172,26 +172,138 @@ pub fn Modal(
     }
 }
 
+/// An address players type in their game, with a copy button.
+#[component]
+pub fn CopyAddress(address: String) -> impl IntoView {
+    let copied = address.clone();
+    view! {
+        <div class="connect">
+            <code title="How players join">{address}</code>
+            <button type="button" aria-label="Copy the address" on:click=move |ev| {
+                ev.stop_propagation();
+                copy_to_clipboard(&copied);
+                toasts().ok("Address copied: paste it in the game");
+            }>"Copy"</button>
+        </div>
+    }
+}
+
 /// How players join a server, with a copy button. `template` may hold `{host}`.
 #[component]
 pub fn ConnectAddress(#[prop(into)] template: Signal<Option<String>>) -> impl IntoView {
-    let address = move || template.get().map(|t| crate::util::connect_address(&t));
+    // Redrawn only when the address changes, not at each poll of the server.
+    let address = Memo::new(move |_| template.get().map(|t| crate::util::connect_address(&t)));
     view! {
-        {move || match address() {
-            Some(address) => {
-                let copied = address.clone();
-                view! {
-                    <div class="connect">
-                        <code title="How players join">{address}</code>
-                        <button type="button" aria-label="Copy the address" on:click=move |ev| {
-                            ev.stop_propagation();
-                            copy_to_clipboard(&copied);
-                            toasts().ok("Address copied: paste it in the game");
-                        }>"Copy"</button>
-                    </div>
-                }.into_any()
-            }
+        {move || match address.get() {
+            Some(address) => view! { <CopyAddress address/> }.into_any(),
             None => view! { <span class="connect-pending">"No address yet"</span> }.into_any(),
+        }}
+    }
+}
+
+/// The host of `host:port`.
+fn host_of(address: &str) -> &str {
+    address.rsplit_once(':').map_or(address, |(host, _)| host)
+}
+
+/// Who can join, compactly, for a server's card (desktop app): the address to give
+/// and a line saying who it works for.
+#[component]
+pub fn ReachSummary(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
+    let reach = Memo::new(move |_| reach.get());
+    view! {
+        {move || {
+            let r = reach.get();
+            let address = match r.state {
+                ReachState::Internet => r.public.clone().or(r.local.clone()),
+                _ => r.local.clone(),
+            };
+            let (class, status) = match r.state {
+                ReachState::Checking => ("reach-status muted", "Opening ports on your router…"),
+                ReachState::Internet => ("reach-status reach-good", "✓ Friends can join"),
+                ReachState::LocalOnly => ("reach-status reach-warn", "⚠ Only your home network can join"),
+                ReachState::NoPublicAddress => {
+                    ("reach-status reach-warn", "⚠ Your connection can't receive games from outside")
+                }
+            };
+            view! {
+                <div class="reach">
+                    {address.map(|address| view! { <CopyAddress address/> })}
+                    <span class=class role="status">
+                        {(r.state == ReachState::Checking).then(|| view! {
+                            <span class="spinner spinner-sm" aria-hidden="true"></span>
+                        })}
+                        {status}
+                    </span>
+                </div>
+            }
+        }}
+    }
+}
+
+/// Who can join, in full, for a server's page (desktop app): the address, and how
+/// to let friends in when they cannot.
+#[component]
+pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
+    let reach = Memo::new(move |_| reach.get());
+    view! {
+        {move || {
+            let r = reach.get();
+            let detail = r.detail.clone().map(|d| view! { <div class="small reach-detail">{d}</div> });
+            match r.state {
+                ReachState::Checking => view! {
+                    <div class="note reach-panel" role="status">
+                        <span class="spinner spinner-sm" aria-hidden="true"></span>
+                        " Opening ports on your router…"
+                    </div>
+                }.into_any(),
+                ReachState::Internet => view! {
+                    <div class="note note-good reach-panel" role="status">
+                        <strong>"✓ Friends can join"</strong>
+                        <span>" Give them this address:"</span>
+                        {r.public.clone().or(r.local.clone()).map(|address| view! { <CopyAddress address/> })}
+                    </div>
+                }.into_any(),
+                ReachState::LocalOnly => {
+                    let forward = if r.forward.is_empty() {
+                        "its ports".to_string()
+                    } else {
+                        r.forward.join(", ")
+                    };
+                    let this_pc = r
+                        .local
+                        .as_deref()
+                        .map(|l| format!(" ({})", host_of(l)))
+                        .unwrap_or_default();
+                    view! {
+                        <div class="note note-warning reach-panel" role="status">
+                            <strong>"⚠ Only your home network can join"</strong>
+                            {r.local.clone().map(|address| view! { <CopyAddress address/> })}
+                            <p>
+                                {format!(
+                                    "To let friends in, turn on UPnP in your router's settings, or forward {forward} to this PC{this_pc}."
+                                )}
+                            </p>
+                            {detail}
+                        </div>
+                    }.into_any()
+                }
+                ReachState::NoPublicAddress => {
+                    let local = r.local.clone().unwrap_or_else(|| "this PC's address".into());
+                    view! {
+                        <div class="note note-warning reach-panel" role="status">
+                            <strong>"⚠ Your connection can't receive games from outside"</strong>
+                            <p>
+                                {format!(
+                                    "Your internet provider shares your address with others. Players at home can join at {local}. To let friends in, ask your provider for a full IPv4 address."
+                                )}
+                            </p>
+                            {r.local.clone().map(|address| view! { <CopyAddress address/> })}
+                            {detail}
+                        </div>
+                    }.into_any()
+                }
+            }
         }}
     }
 }

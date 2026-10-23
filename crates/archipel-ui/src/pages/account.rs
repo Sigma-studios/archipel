@@ -7,6 +7,9 @@ use crate::util::{date, run, use_me};
 
 #[component]
 pub fn Account() -> impl IntoView {
+    if crate::util::desktop() {
+        return view! { <leptos_router::components::Redirect path="/"/> }.into_any();
+    }
     let me = use_me();
     view! {
         <div class="page page-narrow">
@@ -37,6 +40,7 @@ pub fn Account() -> impl IntoView {
             <Password/>
         </div>
     }
+    .into_any()
 }
 
 #[component]

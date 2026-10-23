@@ -1,5 +1,7 @@
 //! Running game servers: each one a process of its own user, in its own cgroup,
-//! its output in its console, its input from the console's command line.
+//! its output in its console, its input from the console's command line. On the
+//! desktop, they run as the person using the computer, without limits, each kept to
+//! its own files by Landlock, its ports opened on the home router while it runs.
 //!
 //! A server's life: `installing` (getting or updating its files) → `starting` →
 //! `running` (once its log says it is ready) → `stopping` → `stopped`; or `crashed`
@@ -14,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use archipel_core::api::{ServerState, ServerUsage};
+use archipel_core::api::{Mode, ServerState, ServerUsage};
 use archipel_core::game::GameDef;
 use archipel_core::template::{self, Context as Ctx, Value};
 use parking_lot::Mutex;
@@ -29,6 +31,8 @@ use crate::files;
 use crate::fsops;
 use crate::games::Games;
 use crate::install::{Installed, Installer, RunAs};
+use crate::reach::Reacher;
+use crate::sandbox::{Allowed, Sandbox};
 use crate::store::{ServerRow, Store};
 
 /// Crashes within this long count towards giving up.
@@ -106,7 +110,9 @@ struct Inner {
     cfg: Config,
     store: Arc<Store>,
     games: Arc<Games>,
-    pub cgroups: Cgroups,
+    cgroups: Cgroups,
+    /// On the desktop: the home router, asked to forward servers' ports.
+    reacher: Option<Arc<Reacher>>,
     installer: Installer,
     instances: Mutex<HashMap<u64, Arc<Instance>>>,
     /// Bytes each server's files take, measured now and then.
@@ -122,7 +128,16 @@ impl Supervisor {
         cgroups: Cgroups,
     ) -> anyhow::Result<Self> {
         std::fs::create_dir_all(cfg.logs_dir())?;
+        let reacher = match cfg.mode() {
+            Mode::Desktop => {
+                let reacher = Reacher::new()?;
+                tokio::spawn(reacher.clone().renew());
+                Some(reacher)
+            }
+            Mode::Hosted => None,
+        };
         Ok(Supervisor(Arc::new(Inner {
+            reacher,
             installer: Installer::new(cfg.clone())?,
             cfg,
             store,
@@ -203,7 +218,10 @@ impl Supervisor {
         if self.0.shutting_down.load(Ordering::Relaxed) {
             bail!("archipel is shutting down");
         }
-        self.0.cgroups.require()?;
+        let hosted = self.hosted();
+        if hosted {
+            self.0.cgroups.require()?;
+        }
         let row = self.0.store.get_server(id)?.context("no such server")?;
         let game = self.game(&row)?;
         let owner = self
@@ -219,6 +237,33 @@ impl Supervisor {
         if row.memory_mb < game.memory.min_mb {
             bail!("{} needs at least {} MB", game.name, game.memory.min_mb);
         }
+        if hosted {
+            self.admit(&row, &owner)?;
+        }
+        self.0.store.set_auto_start(id, hosted)?;
+        *inst.memory_mb.lock() = row.memory_mb;
+        inst.stopping.store(false, Ordering::Relaxed);
+        inst.set(ServerState::Installing, None);
+        let me = self.clone();
+        let task = tokio::spawn({
+            let inst = inst.clone();
+            async move { me.run(inst).await }
+        });
+        *inst.task.lock() = Some(task);
+        Ok(())
+    }
+
+    /// Whether archipel runs hosted (quotas, limits), rather than on a desktop.
+    pub fn hosted(&self) -> bool {
+        self.0.cfg.mode() == Mode::Hosted
+    }
+
+    pub fn reacher(&self) -> Option<&Arc<Reacher>> {
+        self.0.reacher.as_ref()
+    }
+
+    /// Whether the owner's quota and the machine leave room for the server.
+    fn admit(&self, row: &ServerRow, owner: &crate::store::UserRow) -> anyhow::Result<()> {
         let (by_owner, total) = self.memory_in_use();
         let mine = by_owner.get(&owner.id).copied().unwrap_or(0);
         if mine + row.memory_mb > owner.quota.memory_mb {
@@ -248,16 +293,6 @@ impl Supervisor {
                 owner.quota.disk_mb
             );
         }
-        self.0.store.set_auto_start(id, true)?;
-        *inst.memory_mb.lock() = row.memory_mb;
-        inst.stopping.store(false, Ordering::Relaxed);
-        inst.set(ServerState::Installing, None);
-        let me = self.clone();
-        let task = tokio::spawn({
-            let inst = inst.clone();
-            async move { me.run(inst).await }
-        });
-        *inst.task.lock() = Some(task);
         Ok(())
     }
 
@@ -290,6 +325,9 @@ impl Supervisor {
             if let Some(procs) = procs {
                 self.0.cgroups.kill(&procs);
                 self.0.cgroups.remove(&procs).await;
+            }
+            if let Some(reacher) = &self.0.reacher {
+                reacher.close(inst.id).await;
             }
             if inst.stopping.load(Ordering::Relaxed) {
                 inst.console.system("stopped".into());
@@ -347,12 +385,21 @@ impl Supervisor {
         let dir = self.0.cfg.server_dir(id);
         let uid = fsops::uid_of(id);
         fsops::ensure_server_dir(&dir, uid).context("preparing the server's directory")?;
-        self.0.cgroups.ensure_user(owner.id, &owner.quota)?;
-        let procs = self.0.cgroups.create_server(owner.id, id, row.memory_mb)?;
-        *inst.cgroup.lock() = Some(procs.clone());
-        let run_as = RunAs {
-            uid,
-            cgroup: Some(procs),
+        let run_as = if self.hosted() {
+            self.0.cgroups.ensure_user(owner.id, &owner.quota)?;
+            let procs = self.0.cgroups.create_server(owner.id, id, row.memory_mb)?;
+            *inst.cgroup.lock() = Some(procs.clone());
+            RunAs {
+                uid,
+                cgroup: Some(procs),
+                sandbox: None,
+            }
+        } else {
+            RunAs {
+                uid,
+                cgroup: None,
+                sandbox: self.sandbox(&dir, &inst.console)?,
+            }
         };
 
         inst.set(ServerState::Installing, None);
@@ -412,10 +459,11 @@ impl Supervisor {
         }
 
         inst.set(ServerState::Starting, None);
-        inst.console.system(format!(
-            "starting {} with {} MB of memory",
-            row.name, row.memory_mb
-        ));
+        inst.console.system(if self.hosted() {
+            format!("starting {} with {} MB of memory", row.name, row.memory_mb)
+        } else {
+            format!("starting {}", row.name)
+        });
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(args)
             .current_dir(&dir)
@@ -430,6 +478,10 @@ impl Supervisor {
             spawn(cmd, &run_as).with_context(|| format!("running {}", program.display()))?;
         *inst.pid.lock() = child.id().map(|p| p as i32);
         *inst.spawned.lock() = Some(Instant::now());
+        if let Some(reacher) = self.0.reacher.clone() {
+            let ports: Vec<u16> = row.ports.values().copied().collect();
+            tokio::spawn(async move { reacher.open(id, ports).await });
+        }
 
         // The console's command line.
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -481,6 +533,29 @@ impl Supervisor {
         })
     }
 
+    /// The desktop's ruleset keeping a server to its own files and the ones archipel
+    /// shares; without Landlock, the server runs anyway, and its console says so.
+    fn sandbox(&self, dir: &Path, console: &Console) -> anyhow::Result<Option<Arc<Sandbox>>> {
+        let read = vec![self.0.cfg.shared_dir(), self.0.cfg.runtimes_dir()];
+        for d in &read {
+            // Rules hold for what is put there later, but need the directory.
+            std::fs::create_dir_all(d)?;
+        }
+        let allowed = Allowed {
+            own: dir.to_path_buf(),
+            read,
+        };
+        Ok(match Sandbox::prepare(&allowed) {
+            Ok(sandbox) => Some(Arc::new(sandbox)),
+            Err(why) => {
+                console.system(format!(
+                    "{why}: the server can read your files, not just its own"
+                ));
+                None
+            }
+        })
+    }
+
     /// Says why a server could not start.
     pub fn not_started(&self, id: u64, why: &anyhow::Error) {
         let inst = self.instance(id);
@@ -505,6 +580,8 @@ impl Supervisor {
         }
         let row = self.0.store.get_server(id)?.context("no such server")?;
         let game = self.game(&row)?;
+        // Before its log says it is ready, a server may not act on its console yet.
+        let ready = game.run.ready.is_none() || inst.status().state == ServerState::Running;
         inst.set(ServerState::Stopping, None);
         let pid = *inst.pid.lock();
         let Some(pid) = pid else {
@@ -524,6 +601,7 @@ impl Supervisor {
         };
         inst.console.system("stopping".into());
         match (&game.run.stop_command, &game.run.stop_signal) {
+            (Some(_), _) if !ready => signal_group(pid, libc::SIGTERM),
             (Some(command), _) => {
                 let tx = inst.stdin.lock().clone();
                 if let Some(tx) = tx {
@@ -638,6 +716,19 @@ impl Supervisor {
             }
         });
         futures_util::future::join_all(stops).await;
+        if let Some(reacher) = &self.0.reacher {
+            reacher.close_all().await;
+        }
+    }
+
+    /// How many servers are running, starting or installing.
+    pub fn active(&self) -> usize {
+        self.0
+            .instances
+            .lock()
+            .values()
+            .filter(|i| i.is_active())
+            .count()
     }
 
     /// Measures servers now and then: memory and CPU every few seconds, disk use
@@ -653,11 +744,18 @@ impl Supervisor {
             rounds += 1;
             let instances: Vec<Arc<Instance>> = self.0.instances.lock().values().cloned().collect();
             for inst in instances {
-                let procs = inst.cgroup.lock().clone();
-                let Some(procs) = procs.filter(|_| inst.pid.lock().is_some()) else {
+                let Some(pid) = *inst.pid.lock() else {
                     continue;
                 };
-                let Some((memory, cpu_usec)) = self.0.cgroups.stats(&procs) else {
+                let procs = inst.cgroup.lock().clone();
+                let stats = match procs {
+                    Some(procs) => self.0.cgroups.stats(&procs),
+                    None => tokio::task::spawn_blocking(move || tree_stats(pid))
+                        .await
+                        .ok()
+                        .flatten(),
+                };
+                let Some((memory, cpu_usec)) = stats else {
                     continue;
                 };
                 let now = Instant::now();
@@ -842,7 +940,7 @@ async fn missing_program(program: &Path, dir: &Path, uid: u32) -> String {
 }
 
 /// Spawns `cmd` as the server's user, in its cgroup, in a session of its own
-/// (so signals reach everything it starts).
+/// (so signals reach everything it starts); on the desktop, kept to its files.
 fn spawn(
     mut cmd: tokio::process::Command,
     run_as: &RunAs,
@@ -853,6 +951,8 @@ fn spawn(
         .map(|p| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()))
         .transpose()?;
     let uid = run_as.uid;
+    let switch_user = !fsops::servers_run_as_self();
+    let sandbox = run_as.sandbox.as_ref().map(|s| s.raw_fd());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -882,11 +982,22 @@ fn spawn(
             }
             // Its own user last: joining the cgroup takes root. (std's `uid` would
             // switch before these closures run.)
-            if libc::setgroups(0, std::ptr::null()) != 0
-                || libc::setgid(uid) != 0
-                || libc::setuid(uid) != 0
+            if switch_user
+                && (libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setgid(uid) != 0
+                    || libc::setuid(uid) != 0)
             {
                 return Err(std::io::Error::last_os_error());
+            }
+            if !switch_user {
+                // On the desktop, servers end with the app, even if it is killed.
+                // (The signal comes when the thread that started them ends: a
+                // runtime worker, which lives as long as the app.)
+                #[cfg(target_os = "linux")]
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            }
+            if let Some(fd) = sandbox {
+                crate::sandbox::enter(fd)?;
             }
             Ok(())
         });
@@ -950,6 +1061,60 @@ pub async fn run_logged(
         bail!("exited with {status}");
     }
     Ok(())
+}
+
+/// Memory (resident bytes) and CPU time (microseconds) of a process and all it
+/// started: the desktop's servers have no cgroup to read them from.
+fn tree_stats(root: i32) -> Option<(u64, u64)> {
+    // SAFETY: sysconf has no preconditions.
+    let (page, ticks) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PAGESIZE).max(1) as u64,
+            libc::sysconf(libc::_SC_CLK_TCK).max(1) as u64,
+        )
+    };
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    let mut found = HashMap::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // After the name, in parentheses and possibly holding spaces: state, ppid…
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let field = |n: usize| {
+            fields
+                .get(n)
+                .and_then(|f| f.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        let ppid = field(1) as i32;
+        // utime and stime, then rss in pages.
+        let cpu = field(11) + field(12);
+        let rss = field(21);
+        children.entry(ppid).or_default().push(pid);
+        found.insert(pid, (rss * page, cpu * 1_000_000 / ticks));
+    }
+    found.get(&root)?;
+    let (mut memory, mut cpu) = (0, 0);
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if let Some((m, c)) = found.get(&pid) {
+            memory += m;
+            cpu += c;
+        }
+        stack.extend(children.get(&pid).into_iter().flatten());
+    }
+    Some((memory, cpu))
 }
 
 fn signal_group(pid: i32, signal: i32) {

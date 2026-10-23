@@ -19,6 +19,9 @@ facade container (facade's limits: the pie)
         └── s2 Urban Terror (512 MB)
 ```
 
+It also comes as a desktop app for Linux, for one person running servers for their
+friends on their own computer ([below](#on-your-own-computer)).
+
 Games: **Minecraft** (vanilla or Paper, any version; Java is fetched to match),
 **Urban Terror** 4.3 (its 1.4 GB of files downloaded once, shared by every server),
 **Puck** (from Steam). Adding one is writing a file (below).
@@ -64,6 +67,32 @@ and the ports are published there. The node must run x86_64 for Urban Terror and
 | `ARCHIPEL_PUBLIC_HOST` | | the address players use; without it, the one the UI is browsed at |
 | `ARCHIPEL_RESERVE_MB` | `256` | memory kept for archipel |
 | `ARCHIPEL_ADMIN_PASSWORD` | | the first admin's password (otherwise random, in `<data>/initial-admin-password`) |
+
+## On your own computer
+
+The desktop app (Linux, x86_64 or arm64: a `.deb` or an AppImage from the
+[releases](https://github.com/Sigma-studios/archipel/releases)) is the same archipel
+and the same UI, in a window, for the one person using the computer:
+
+* **No login, no network port.** The window talks to archipel inside the app through a
+  URL scheme of its own (`archipel://`): nothing listens for the UI, so nothing else
+  on the network can reach it.
+* **No limits, no quotas.** A server's memory is what its game is given (Minecraft's
+  Java heap). Servers start when asked, never by themselves: not at login, not when
+  the app opens. Closing the window stops them, once confirmed (worlds are saved).
+* **Ports on the router.** When a server starts, archipel asks the home router to
+  forward its ports (NAT-PMP, then UPnP), renews that while it runs and takes it back
+  when it stops. The server page then says who can join: anyone (with the address
+  to share), only the home network (with the ports to forward by hand, if the router
+  would not), or no one outside whatever the router does (the connection has no
+  public address of its own: carrier-grade NAT, or a second router in front).
+* **Kept to its files.** Servers run as you, so each is confined with Landlock
+  (Linux 5.13 or later) to its own directory, the game files archipel shares and
+  the system's: not your home folder, not the other servers. Without Landlock they
+  run anyway, and their console says they are not confined.
+
+Its data is in `~/.local/share/archipel`. SteamCMD (Puck) needs 32-bit libraries on
+x86_64 (`lib32gcc-s1` on Debian and Ubuntu); Urban Terror and Puck need x86_64.
 
 ## How servers are kept apart
 
@@ -133,6 +162,7 @@ placeholder keeps its type in JSON. See [`games/`](games/) for complete examples
 | `archipel-core` | game definitions, templates, API types |
 | `archipel` | the server: API, supervisor, installers, cgroups |
 | `archipel-ui` | the web UI (Leptos, WebAssembly), embedded in `archipel` |
+| `archipel-desktop` | the desktop app (Tauri): archipel and its UI in a window |
 
 The API is described in [docs/api.md](docs/api.md).
 
@@ -144,4 +174,6 @@ cd crates/archipel-ui && trunk serve        # http://127.0.0.1:8080
 ```
 
 archipel itself needs Linux and root (it switches users and manages cgroups); run it
-in its container (`docker build -t archipel .`).
+in its container (`docker build -t archipel .`). The desktop app needs WebKitGTK
+(`libwebkit2gtk-4.1-dev`) and the Tauri CLI: build the UI as above, then
+`cd crates/archipel-desktop && cargo tauri build`.

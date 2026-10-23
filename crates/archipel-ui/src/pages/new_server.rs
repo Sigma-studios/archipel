@@ -7,7 +7,7 @@ use leptos_router::hooks::{use_navigate, use_query_map};
 use super::settings_form::{MemoryField, SettingsFields, defaults};
 use crate::api;
 use crate::components::{ErrorNote, GameBadge, Loading};
-use crate::util::{is_admin, mb, polled, toasts, use_me};
+use crate::util::{desktop, is_admin, mb, polled, toasts, use_me};
 
 #[component]
 pub fn NewServer() -> impl IntoView {
@@ -69,7 +69,11 @@ fn GamePicker(#[prop(into)] games: Signal<Vec<GameDef>>) -> impl IntoView {
             <div class="empty">
                 <div class="empty-art" aria-hidden="true">"🎲"</div>
                 <h2>"No games available"</h2>
-                <p>"Your admin hasn't added any game to archipel yet."</p>
+                <p>{if desktop() {
+                    "archipel found no game definitions."
+                } else {
+                    "Your admin hasn't added any game to archipel yet."
+                }}</p>
             </div>
         }>
             <p class="lead">"What do you want to play?"</p>
@@ -131,13 +135,23 @@ fn SetupForm(game: GameDef) -> impl IntoView {
         o.is_empty() || o == my_name()
     };
     let whose = move || {
-        if mine() {
+        if desktop() {
+            "this PC's".to_string()
+        } else if mine() {
             "your".to_string()
         } else {
             format!("{}'s", owner.get())
         }
     };
 
+    // "your 6 GB", or "this PC's memory (6 GB)".
+    let memory_of = |quota: u64| {
+        if desktop() {
+            format!("memory ({})", mb(quota))
+        } else {
+            mb(quota)
+        }
+    };
     let min_mb = game.memory.min_mb;
     let default_mb = game.memory.default_mb;
     let quota_mb = move || owner_user.with(|u| u.as_ref().map_or(0, |u| u.quota.memory_mb));
@@ -227,18 +241,26 @@ fn SetupForm(game: GameDef) -> impl IntoView {
             <Show when=full>
                 <div class="note note-warning" role="alert">
                     {move || format!(
-                        "All {} of {} servers are in use. Delete one to make room, or ask your admin for more.",
+                        "All {} of {} servers are in use. Delete one to make room{}.",
                         owner_user.with(|u| u.as_ref().map_or(0, |u| u.quota.max_servers)),
                         whose(),
+                        if desktop() { "" } else { ", or ask your admin for more" },
                     )}
                 </div>
             </Show>
             <Show when=too_small>
                 <div class="note note-warning" role="alert">
-                    {move || format!(
-                        "This game needs at least {}, more than {} whole quota ({}). Ask your admin for more memory.",
-                        mb(min_mb), whose(), mb(quota_mb()),
-                    )}
+                    {move || if desktop() {
+                        format!(
+                            "This game needs at least {}, more than this PC can give its servers ({}).",
+                            mb(min_mb), mb(quota_mb()),
+                        )
+                    } else {
+                        format!(
+                            "This game needs at least {}, more than {} whole quota ({}). Ask your admin for more memory.",
+                            mb(min_mb), whose(), mb(quota_mb()),
+                        )
+                    }}
                 </div>
             </Show>
 
@@ -273,12 +295,12 @@ fn SetupForm(game: GameDef) -> impl IntoView {
                             help=Signal::derive(move || if can_start() {
                                 format!(
                                     "{} left of {} {} for running servers. More memory lets more players in and loads big worlds faster.",
-                                    mb(free_mb()), whose(), mb(quota_mb()),
+                                    mb(free_mb()), whose(), memory_of(quota_mb()),
                                 )
                             } else {
                                 format!(
                                     "Running servers already use {} of {} {}: stop one to start this one. You can create it now and start it later.",
-                                    mb(used_mb()), whose(), mb(quota_mb()),
+                                    mb(used_mb()), whose(), memory_of(quota_mb()),
                                 )
                             })/>
                     </Show>

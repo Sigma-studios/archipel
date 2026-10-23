@@ -1,3 +1,4 @@
 /target
 /crates/archipel-ui/dist
 /dev-data
+/crates/archipel-desktop/gen

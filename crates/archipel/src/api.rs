@@ -39,7 +39,9 @@ type S = State<Arc<App>>;
 type ApiResult<T> = Result<T, ApiError>;
 
 pub fn router(app: Arc<App>) -> Router {
-    Router::new()
+    let desktop = app.cfg.mode() == Mode::Desktop;
+    let router = Router::new()
+        .route("/api/about", get(about))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
@@ -56,6 +58,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/servers/{id}/restart", post(restart_server))
         .route("/api/servers/{id}/reinstall", post(reinstall_server))
         .route("/api/servers/{id}/console", get(console).post(command))
+        .route("/api/servers/{id}/console/lines", get(console_lines))
         .route("/api/servers/{id}/files", get(list_files).put(save_file))
         .route("/api/overview", get(overview))
         .route("/api/users", get(list_users).post(create_user))
@@ -63,8 +66,53 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/users/{username}",
             put(update_user).delete(delete_user),
         )
-        .fallback(crate::ui::serve)
-        .with_state(app)
+        .fallback(crate::ui::serve);
+    let router = if desktop {
+        router.layer(axum::middleware::from_fn(only_this_computer))
+    } else {
+        router
+    };
+    router.with_state(app)
+}
+
+/// The desktop has no login: only its own window may call (or, developing, a
+/// browser on this computer), not a web page elsewhere aiming at a local port
+/// (through DNS rebinding, or a form posted across sites).
+async fn only_this_computer(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    fn local(url_host: &str) -> bool {
+        let host = url_host
+            .rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+            .map_or(url_host, |(host, _)| host);
+        matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+    }
+    let headers = req.headers();
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or(req.uri().authority().map(|a| a.as_str()));
+    let origin_ok = match headers.get(header::ORIGIN).map(|o| o.to_str()) {
+        None => true,
+        Some(Ok(origin)) => origin.split_once("://").is_some_and(|(scheme, host)| {
+            matches!(scheme, "archipel" | "http" | "tauri") && local(host)
+        }),
+        Some(Err(_)) => false,
+    };
+    if !host.is_some_and(local) || !origin_ok {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            "only this computer's archipel window".into(),
+        )
+        .into_response();
+    }
+    next.run(req).await
+}
+
+async fn about(State(app): S) -> Json<About> {
+    Json(About {
+        mode: app.cfg.mode(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    })
 }
 
 // ---------------------------------------------------------------- errors
@@ -151,6 +199,17 @@ impl FromRequestParts<Arc<App>> for Caller {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> ApiResult<Self> {
+        if app.cfg.mode() == Mode::Desktop {
+            // No login: the person at the computer owns everything.
+            let user = app
+                .store
+                .user_by_name(OWNER)?
+                .ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "no owner".into()))?;
+            return Ok(Caller {
+                user,
+                token_hash: String::new(),
+            });
+        }
         let unauthorized = || ApiError(StatusCode::UNAUTHORIZED, "please log in".into());
         let token = parts
             .headers
@@ -199,6 +258,27 @@ pub fn ensure_admin(app: &App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The desktop's one user, whom every request is from.
+const OWNER: &str = "you";
+
+/// Creates the desktop's user, admin of no one but themselves, without limits.
+pub fn ensure_owner(app: &App) -> anyhow::Result<()> {
+    if app.store.user_by_name(OWNER)?.is_some() {
+        return Ok(());
+    }
+    let quota = Quota {
+        memory_mb: 1024 * 1024,
+        cpu_percent: 100 * 1024,
+        max_servers: 1000,
+        disk_mb: 1024 * 1024 * 1024,
+    };
+    // No password logs in as them: there is no login.
+    let password = hash_password(&random_token())?;
+    app.store
+        .create_user(OWNER, &password, Role::Admin, &quota)?;
+    Ok(())
+}
+
 pub fn write_private(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -213,6 +293,9 @@ pub fn write_private(path: &std::path::Path, content: &str) -> anyhow::Result<()
 }
 
 async fn login(State(app): S, Json(req): Json<LoginRequest>) -> ApiResult<Json<LoginResponse>> {
+    if app.cfg.mode() == Mode::Desktop {
+        return Err(not_found("the desktop app has no login"));
+    }
     let user = app.store.user_by_name(req.username.trim())?;
     let Some(user) = user.filter(|u| verify_password(&req.password, &u.password_hash)) else {
         // Slow guessing down.
@@ -235,7 +318,9 @@ async fn login(State(app): S, Json(req): Json<LoginRequest>) -> ApiResult<Json<L
 }
 
 async fn logout(State(app): S, caller: Caller) -> ApiResult<StatusCode> {
-    app.store.delete_session(&caller.token_hash)?;
+    if !caller.token_hash.is_empty() {
+        app.store.delete_session(&caller.token_hash)?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -397,20 +482,72 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
         .flatten()
         .map(|u| u.username)
         .unwrap_or_default();
-    let connect = game.and_then(|g| {
+    let connect_at = |host: String| {
+        let g = game?;
         let template = g.connect.as_ref()?;
         let settings = g.settings_from(&row.settings).unwrap_or_default();
         let dir = app.cfg.server_dir(row.id);
         let mut ctx = crate::supervisor::context(g, row, &settings, &dir, None, None);
-        // Left for the page to fill in, unless archipel knows.
-        let host = app
-            .cfg
-            .public_host
-            .clone()
-            .unwrap_or_else(|| "{host}".into());
         ctx.insert("host".into(), Value::Text(host));
         template::render(template, &ctx).ok()
-    });
+    };
+    let (connect, reach) = match app.supervisor.reacher() {
+        // Left for the page to fill in, unless archipel knows.
+        None => (
+            connect_at(
+                app.cfg
+                    .public_host
+                    .clone()
+                    .unwrap_or_else(|| "{host}".into()),
+            ),
+            None,
+        ),
+        Some(reacher) => match reacher.status(row.id) {
+            None => (
+                connect_at(
+                    crate::reach::local_ip().map_or("localhost".into(), |ip| ip.to_string()),
+                ),
+                None,
+            ),
+            Some(status) => {
+                let local = status.local_ip.and_then(|ip| connect_at(ip.to_string()));
+                let public = status
+                    .public_ip
+                    .filter(|_| status.state == ReachState::Internet)
+                    .and_then(|ip| {
+                        connect_at(match ip {
+                            std::net::IpAddr::V4(ip) => ip.to_string(),
+                            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+                        })
+                    });
+                let forward = match (status.state, game) {
+                    (ReachState::LocalOnly, Some(g)) => g
+                        .ports
+                        .iter()
+                        .filter_map(|p| {
+                            let number = row.ports.get(&p.name)?;
+                            let protocol = match p.protocol {
+                                archipel_core::game::Protocol::Tcp => "TCP",
+                                archipel_core::game::Protocol::Udp => "UDP",
+                            };
+                            Some(format!("{protocol} {number}"))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (
+                    public.clone().or(local.clone()),
+                    Some(Reach {
+                        state: status.state,
+                        local,
+                        public,
+                        forward,
+                        detail: status.detail,
+                    }),
+                )
+            }
+        },
+    };
     ServerView {
         id: row.id,
         name: row.name.clone(),
@@ -428,6 +565,7 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
         usage: inst.usage(),
         disk_bytes: app.supervisor.disk_bytes(row.id),
         connect,
+        reach,
         auto_start: row.auto_start,
         created_at: row.created_at,
     }
@@ -700,6 +838,29 @@ async fn console(
         .into_response())
 }
 
+#[derive(Deserialize)]
+struct LinesQuery {
+    #[serde(default)]
+    after: u64,
+    #[serde(default)]
+    wait: u64,
+}
+
+/// The console for a page that cannot stream (the desktop window): lines after
+/// `after`, waiting up to `wait` seconds for some.
+async fn console_lines(
+    State(app): S,
+    caller: Caller,
+    Path(id): Path<u64>,
+    Query(q): Query<LinesQuery>,
+) -> ApiResult<Json<ConsoleLines>> {
+    load(&app, &caller, id)?;
+    let inst = app.supervisor.instance(id);
+    let wait = Duration::from_secs(q.wait.min(25));
+    let (lines, next, reset) = inst.console.wait_since(q.after, wait).await;
+    Ok(Json(ConsoleLines { lines, next, reset }))
+}
+
 async fn command(
     State(app): S,
     caller: Caller,
@@ -763,7 +924,15 @@ async fn save_file(
 
 async fn overview(State(app): S, _: Caller) -> ApiResult<Json<Overview>> {
     let rows = app.store.list_servers()?;
-    let (_, used) = app.supervisor.memory_in_use();
+    let used = if app.supervisor.hosted() {
+        app.supervisor.memory_in_use().1
+    } else {
+        // No limits on the desktop: what servers take, measured.
+        rows.iter()
+            .filter_map(|r| app.supervisor.instance(r.id).usage())
+            .map(|u| u.memory_bytes / (1024 * 1024))
+            .sum()
+    };
     let running = rows
         .iter()
         .filter(|r| app.supervisor.instance(r.id).status().state.is_active())

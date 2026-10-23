@@ -71,6 +71,8 @@ const VERSIONS_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
 pub struct RunAs {
     pub uid: u32,
     pub cgroup: Option<PathBuf>,
+    /// On the desktop: the ruleset keeping it to its files.
+    pub sandbox: Option<std::sync::Arc<crate::sandbox::Sandbox>>,
 }
 
 impl Installer {

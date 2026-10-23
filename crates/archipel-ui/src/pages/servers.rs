@@ -1,14 +1,15 @@
 use std::time::Duration;
 
-use archipel_core::api::{ServerState, ServerView};
+use archipel_core::api::{Reach, ReachState, ServerState, ServerView};
 use archipel_core::game::GameDef;
 use leptos::prelude::*;
 
 use crate::api;
 use crate::components::{
-    ConnectAddress, ErrorNote, GameBadge, Loading, Meter, PowerButton, QuotaMeters, StateBadge,
+    ConnectAddress, ErrorNote, GameBadge, Loading, Meter, PowerButton, QuotaMeters, ReachSummary,
+    StateBadge,
 };
-use crate::util::{Polled, bytes, is_admin, mb, percent, polled, use_me};
+use crate::util::{Polled, bytes, desktop, is_admin, mb, percent, polled, use_me};
 
 /// The badge of a game, from the definitions.
 pub fn badge_of(games: Polled<Vec<GameDef>>, game: &str) -> String {
@@ -18,6 +19,17 @@ pub fn badge_of(games: Polled<Vec<GameDef>>, game: &str) -> String {
             .find(|g| g.id == game)
             .map(|g| g.badge.clone())
             .unwrap_or_default()
+    })
+}
+
+/// A server's reachability, or "checking" while it has none.
+pub fn reach_of(reach: Option<&Reach>) -> Reach {
+    reach.cloned().unwrap_or(Reach {
+        state: ReachState::Checking,
+        local: None,
+        public: None,
+        forward: vec![],
+        detail: None,
     })
 }
 
@@ -57,7 +69,9 @@ pub fn Servers() -> impl IntoView {
                 <div>
                     <h1>{move || if admin() { "Servers" } else { "Your servers" }}</h1>
                     <p class="muted subtitle">
-                        {move || if admin() {
+                        {move || if desktop() {
+                            "Game servers running on this PC.".to_string()
+                        } else if admin() {
                             "Every server on this machine, whoever owns it.".to_string()
                         } else {
                             format!("Welcome back, {}!", username())
@@ -72,7 +86,9 @@ pub fn Servers() -> impl IntoView {
 
             <Show when=move || me.loaded()>
                 <section class="card quota-card" aria-labelledby="quota-title">
-                    <h2 class="section-title" id="quota-title">"Your share of the machine"</h2>
+                    <h2 class="section-title" id="quota-title">
+                        {if desktop() { "This PC" } else { "Your share of the machine" }}
+                    </h2>
                     <QuotaMeters user=Signal::derive(move || me.data.get().expect("loaded"))/>
                 </section>
             </Show>
@@ -129,6 +145,8 @@ fn ServerCard(
     let running = move || state.get() == ServerState::Running;
     let usage = move || server.with(|s| s.usage.clone());
     let href = move || format!("/servers/{}", server.with(|s| s.id));
+    // Desktop servers say who can join; hosted ones show their address.
+    let has_reach = Memo::new(move |_| server.with(|s| s.reach.is_some()));
     view! {
         <article class=move || format!("card server-card {}", state_class(state.get()))>
             <div class="server-head">
@@ -145,7 +163,11 @@ fn ServerCard(
                 </div>
                 <StateBadge state/>
             </div>
-            <ConnectAddress template=Signal::derive(move || server.with(|s| s.connect.clone()))/>
+            {move || if has_reach.get() {
+                view! { <ReachSummary reach=Signal::derive(move || server.with(|s| reach_of(s.reach.as_ref())))/> }.into_any()
+            } else {
+                view! { <ConnectAddress template=Signal::derive(move || server.with(|s| s.connect.clone()))/> }.into_any()
+            }}
             <div class="server-stats">
                 <span>"Memory " <strong>{move || mb(server.with(|s| s.memory_mb))}</strong></span>
                 {move || usage().filter(|_| running()).map(|u| view! {

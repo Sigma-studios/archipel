@@ -32,6 +32,14 @@ pub struct Cgroups {
 }
 
 impl Cgroups {
+    /// No cgroups to manage, for `why`: servers run without limits.
+    pub fn none(why: &str) -> Self {
+        Cgroups {
+            root: PathBuf::from(ROOT),
+            off: Some(why.to_string()),
+        }
+    }
+
     /// Takes over the container's cgroup, waiting a little for facade to make it
     /// writable (it does so a moment after the container starts).
     pub async fn setup() -> Self {

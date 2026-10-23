@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use archipel_core::api::{
-    CommandRequest, FileView, SaveFile, ServerState, ServerView, UpdateServer, UserView,
+    CommandRequest, ConsoleLines, FileView, SaveFile, ServerState, ServerView, UpdateServer,
+    UserView,
 };
 use archipel_core::game::GameDef;
 use leptos::prelude::*;
@@ -9,13 +10,13 @@ use leptos::task::spawn_local;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
-use super::servers::badge_of;
+use super::servers::{badge_of, reach_of};
 use super::settings_form::{MemoryField, SettingsFields, defaults};
 use crate::api;
 use crate::components::{
-    ConnectAddress, ErrorNote, GameBadge, Loading, Modal, PowerButton, StateBadge,
+    ConnectAddress, ErrorNote, GameBadge, Loading, Modal, PowerButton, ReachPanel, StateBadge,
 };
-use crate::util::{is_admin, mb, polled, run, since, strip_ansi, toasts, use_me};
+use crate::util::{desktop, is_admin, mb, polled, run, since, strip_ansi, toasts, use_me};
 
 const TABS: &[(&str, &str)] = &[
     ("console", "Console"),
@@ -85,6 +86,9 @@ pub fn ServerPage() -> impl IntoView {
             move || server.reload(),
         );
     };
+    // Desktop servers say who can join, under the header, instead of an address.
+    let has_reach =
+        Memo::new(move |_| current.with(|s| s.as_ref().is_some_and(|s| s.reach.is_some())));
     let subtitle = move || {
         current.with(|s| {
             let Some(s) = s else { return String::new() };
@@ -95,7 +99,7 @@ pub fn ServerPage() -> impl IntoView {
             let mine = me
                 .data
                 .with(|u| u.as_ref().is_some_and(|u| u.username == s.owner));
-            if !mine {
+            if !mine && !desktop() {
                 parts.push(format!("owned by {}", s.owner));
             }
             if let (ServerState::Running, Some(at)) = (s.state, s.started_at) {
@@ -127,7 +131,9 @@ pub fn ServerPage() -> impl IntoView {
                         </div>
                     </div>
                     <div class="actions">
-                        <ConnectAddress template=Signal::derive(move || current.with(|s| s.as_ref().and_then(|s| s.connect.clone())))/>
+                        <Show when=move || !has_reach.get()>
+                            <ConnectAddress template=Signal::derive(move || current.with(|s| s.as_ref().and_then(|s| s.connect.clone())))/>
+                        </Show>
                         <PowerButton big=true on_done=on_changed
                             server=Signal::derive(move || current.get().expect("loaded"))/>
                         <button type="button" class="button button-big"
@@ -135,6 +141,9 @@ pub fn ServerPage() -> impl IntoView {
                             on:click=restart>"↻ Restart"</button>
                     </div>
                 </header>
+                <Show when=move || has_reach.get()>
+                    <ReachPanel reach=Signal::derive(move || current.with(|s| reach_of(s.as_ref().and_then(|s| s.reach.as_ref()))))/>
+                </Show>
 
                 {move || current.with(|s| s.as_ref().and_then(|s| s.message.clone().map(|m| (s.state, m))))
                     .filter(|(st, _)| matches!(st, ServerState::Crashed | ServerState::Installing | ServerState::Starting))
@@ -219,23 +228,21 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
         counter.update_value(|c| *c += 1);
         counter.get_value()
     };
-    let streaming = RwSignal::new(false);
+    // The last poll answered: the console is live.
+    let live = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let retry = RwSignal::new(0u32);
     let controller = StoredValue::new_local(None::<web_sys::AbortController>);
     let pane = NodeRef::<leptos::html::Div>::new();
     // Follow the newest line, unless the user scrolled up to read.
     let stick = RwSignal::new(true);
     let state = move || server.with(|s| s.as_ref().map_or(ServerState::Stopped, |s| s.state));
-    // A new run of the server: open the stream again to follow it.
-    let epoch = Memo::new(move |_| {
-        server.with(|s| s.as_ref().map(|s| (s.started_at, s.state.is_active())))
-    });
 
+    // Long polls rather than a stream (the desktop app's responses cannot stream):
+    // each asks for the lines after the last one seen, and the server answers as
+    // soon as there are some, or after `wait` seconds. The poll survives restarts:
+    // the server says when the lines shown are gone (`reset`).
     Effect::new(move |_| {
         let id = id.get();
-        epoch.track();
-        retry.track();
         if let Some(previous) = controller.get_value() {
             previous.abort();
         }
@@ -244,52 +251,41 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
         };
         controller.set_value(Some(abort.clone()));
         error.set(None);
-        streaming.set(true);
         spawn_local(async move {
-            let mut partial = String::new();
-            // The stream starts with the last lines again: they replace what is shown.
-            let mut first = true;
-            let path = format!("/api/servers/{id}/console?tail=500&follow=true");
-            let result = api::stream_text(&path, &abort.signal(), |chunk| {
-                partial.push_str(&chunk);
-                let mut fresh = vec![];
-                while let Some(i) = partial.find('\n') {
-                    let line: String = partial.drain(..=i).collect();
-                    fresh.push((next_key(), LineKind::Output, strip_ansi(line.trim_end())));
-                }
-                if !fresh.is_empty() {
-                    let replace = std::mem::take(&mut first);
-                    lines.try_update(|l| {
-                        if replace {
-                            l.clear();
+            let signal = abort.signal();
+            let mut after = 0u64;
+            while !signal.aborted() {
+                let path = format!("/api/servers/{id}/console/lines?after={after}&wait=25");
+                match api::get_abortable::<ConsoleLines>(&path, &signal).await {
+                    Ok(batch) => {
+                        let replace = batch.reset || after == 0;
+                        after = batch.next;
+                        live.try_set(true);
+                        error.try_set(None);
+                        let fresh: Vec<_> = batch
+                            .lines
+                            .iter()
+                            .map(|l| (next_key(), LineKind::Output, strip_ansi(l.trim_end())))
+                            .collect();
+                        if replace || !fresh.is_empty() {
+                            lines.try_update(|l| {
+                                if replace {
+                                    l.clear();
+                                }
+                                l.extend(fresh);
+                                if l.len() > MAX_LINES {
+                                    l.drain(..l.len() - MAX_LINES);
+                                }
+                            });
                         }
-                        l.extend(fresh);
-                        if l.len() > MAX_LINES {
-                            l.drain(..l.len() - MAX_LINES);
-                        }
-                    });
+                    }
+                    Err(_) if signal.aborted() => break,
+                    Err(e) => {
+                        live.try_set(false);
+                        error.try_set(Some(e));
+                        gloo_timers::future::TimeoutFuture::new(3000).await;
+                    }
                 }
-            })
-            .await;
-            if abort.signal().aborted() {
-                return;
-            }
-            streaming.try_set(false);
-            if let Err(e) = result {
-                error.try_set(Some(e));
-            }
-            // The stream ended while the server should be running: try again shortly.
-            let active = server
-                .try_get_untracked()
-                .flatten()
-                .is_some_and(|s| s.state.is_active());
-            if active {
-                set_timeout(
-                    move || {
-                        retry.try_update(|r| *r += 1);
-                    },
-                    Duration::from_secs(3),
-                );
             }
         });
     });
@@ -381,11 +377,11 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
         <ErrorNote error=error/>
         <section class="console" aria-label="Console">
             <div class="console-bar">
-                <span class=move || if streaming.get() { "console-live on" } else { "console-live" }>
-                    {move || match (streaming.get(), state()) {
+                <span class=move || if live.get() && state().is_active() { "console-live on" } else { "console-live" }>
+                    {move || match (live.get(), state()) {
+                        (_, ServerState::Stopped | ServerState::Crashed) => "Server stopped",
                         (true, _) => "Live",
-                        (false, ServerState::Stopped | ServerState::Crashed) => "Server stopped",
-                        (false, _) => "Reconnecting…",
+                        (false, _) => "Connecting…",
                     }}
                 </span>
                 <span class="push-right">
@@ -591,7 +587,11 @@ fn SettingsTab(
                         <input type="text" bind:value=name required maxlength="64" autocomplete="off"/>
                     </label>
                     <MemoryField value=memory min=min_mb max=max_mb default_mb
-                        help=Signal::derive(|| "Taken from your quota while the server runs.".to_string())/>
+                        help=Signal::derive(|| if desktop() {
+                            "Reserved from this PC's memory while the server runs.".to_string()
+                        } else {
+                            "Taken from your quota while the server runs.".to_string()
+                        })/>
                 </div>
             </fieldset>
             <fieldset class="form-section">

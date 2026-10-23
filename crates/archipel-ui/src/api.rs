@@ -1,12 +1,14 @@
-//! Calls to the archipel API. The session token lives in localStorage and goes in an
-//! `Authorization` header; a 401 sends the user back to the login page.
+//! Calls to the archipel API, on the page's own origin (`http(s)://…` hosted, or
+//! `archipel://localhost` in the desktop app). Hosted, the session token lives in
+//! localStorage and goes in an `Authorization` header, and a 401 sends the user
+//! back to the login page; the desktop app has no login.
 
 use archipel_core::api::ErrorBody;
-use futures_util::StreamExt;
 use gloo_net::http::{Method, RequestBuilder, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use wasm_bindgen::JsCast;
+
+use crate::util::desktop;
 
 const TOKEN_KEY: &str = "archipel.token";
 
@@ -41,7 +43,9 @@ async fn call(
     abort: Option<&web_sys::AbortSignal>,
 ) -> Result<Response, String> {
     let mut builder = RequestBuilder::new(path).method(method);
-    if let Some(token) = token() {
+    if !desktop()
+        && let Some(token) = token()
+    {
         builder = builder.header("Authorization", &format!("Bearer {token}"));
     }
     builder = builder.abort_signal(abort);
@@ -59,7 +63,7 @@ async fn call(
     if response.ok() {
         return Ok(response);
     }
-    if response.status() == 401 && !path.ends_with("/login") {
+    if response.status() == 401 && !path.ends_with("/login") && !desktop() {
         go_to_login();
         return Err("Your session has expired, please sign in again.".into());
     }
@@ -117,19 +121,10 @@ pub async fn delete(path: &str) -> Result<(), String> {
     call(Method::DELETE, path, None, None).await.map(|_| ())
 }
 
-/// Streams a text response chunk by chunk until it ends or `abort` fires.
-pub async fn stream_text(
+/// GET that `abort` cancels: long polls, given up when the page is left.
+pub async fn get_abortable<T: DeserializeOwned>(
     path: &str,
     abort: &web_sys::AbortSignal,
-    mut on_chunk: impl FnMut(String),
-) -> Result<(), String> {
-    let response = call(Method::GET, path, None, Some(abort)).await?;
-    let body = response.body().ok_or("empty response")?;
-    let mut stream = wasm_streams::ReadableStream::from_raw(body.unchecked_into()).into_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "The console connection was interrupted.".to_string())?;
-        let bytes = js_sys::Uint8Array::new(&chunk).to_vec();
-        on_chunk(String::from_utf8_lossy(&bytes).into_owned());
-    }
-    Ok(())
+) -> Result<T, String> {
+    decode(call(Method::GET, path, None, Some(abort)).await?).await
 }

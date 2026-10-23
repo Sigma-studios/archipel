@@ -14,6 +14,9 @@ const TABS: &[(&str, &str)] = &[("users", "Users"), ("machine", "Machine")];
 
 #[component]
 pub fn Admin() -> impl IntoView {
+    if crate::util::desktop() {
+        return view! { <leptos_router::components::Redirect path="/"/> }.into_any();
+    }
     let me = use_me();
     let query = use_query_map();
     let navigate = use_navigate();
@@ -69,6 +72,7 @@ pub fn Admin() -> impl IntoView {
             </Show>
         </div>
     }
+    .into_any()
 }
 
 // ---------------------------------------------------------------- users

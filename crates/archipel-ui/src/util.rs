@@ -238,11 +238,16 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 /// A server's connect address with `{host}` filled in with the address this page
-/// is browsed at.
+/// is browsed at (hosted mode; on the desktop the server fills it in itself).
 pub fn connect_address(template: &str) -> String {
-    let host = web_sys::window()
-        .and_then(|w| w.location().hostname().ok())
-        .filter(|h| !h.is_empty())
+    let browsed = || {
+        web_sys::window()
+            .and_then(|w| w.location().hostname().ok())
+            .filter(|h| !h.is_empty())
+    };
+    let host = (!desktop())
+        .then(browsed)
+        .flatten()
         .unwrap_or_else(|| "localhost".into());
     template.replace("{host}", &host)
 }
@@ -264,9 +269,29 @@ pub fn use_me() -> Me {
     expect_context::<Me>()
 }
 
+/// Admin pages and other people's servers: hosted mode only (on the desktop the
+/// one user owns everything, and there is nobody to manage).
 pub fn is_admin(me: Me) -> bool {
-    me.data.with(|u| {
-        u.as_ref()
-            .is_some_and(|u| u.role == archipel_core::api::Role::Admin)
-    })
+    !desktop()
+        && me.data.with(|u| {
+            u.as_ref()
+                .is_some_and(|u| u.role == archipel_core::api::Role::Admin)
+        })
+}
+
+// ---------------------------------------------------------------- mode
+
+thread_local! {
+    // Asked once from `GET /api/about` before any page shows, and fixed after.
+    static MODE: std::cell::Cell<archipel_core::api::Mode> =
+        const { std::cell::Cell::new(archipel_core::api::Mode::Hosted) };
+}
+
+pub fn set_mode(mode: archipel_core::api::Mode) {
+    MODE.with(|m| m.set(mode));
+}
+
+/// The desktop app: no login, one owner, the quota is this PC.
+pub fn desktop() -> bool {
+    MODE.with(|m| m.get()) == archipel_core::api::Mode::Desktop
 }

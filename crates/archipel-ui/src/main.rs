@@ -7,23 +7,46 @@ mod util;
 
 use std::time::Duration;
 
-use archipel_core::api::{LoginRequest, LoginResponse, UserView};
+use archipel_core::api::{About, LoginRequest, LoginResponse, Mode, UserView};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::components::{A, Outlet, ParentRoute, Route, Router, Routes};
+use leptos_router::components::{A, Outlet, ParentRoute, Redirect, Route, Router, Routes};
 use leptos_router::hooks::use_navigate;
 use leptos_router::path;
 
 use components::BrandMark;
-use util::{Me, is_admin, polled};
+use util::{Me, desktop, is_admin, polled};
 
 fn main() {
     console_error_panic_hook::set_once();
     mount_to_body(App);
 }
 
+/// Asks how archipel runs (hosted, or the desktop app) before showing any page:
+/// it decides whether there is a login at all.
 #[component]
 fn App() -> impl IntoView {
+    let ready = RwSignal::new(false);
+    spawn_local(async move {
+        // An archipel without `/api/about` predates the desktop app: hosted.
+        let mode = api::get::<About>("/api/about")
+            .await
+            .map_or(Mode::Hosted, |a| a.mode);
+        util::set_mode(mode);
+        ready.set(true);
+    });
+    view! {
+        <Show when=move || ready.get() fallback=|| view! {
+            <div class="login"><components::Loading/></div>
+        }>
+            <Pages/>
+        </Show>
+        <ToastHost/>
+    }
+}
+
+#[component]
+fn Pages() -> impl IntoView {
     view! {
         <Router>
             <Routes fallback=|| view! { <NotFound/> }>
@@ -37,7 +60,6 @@ fn App() -> impl IntoView {
                 </ParentRoute>
             </Routes>
         </Router>
-        <ToastHost/>
     }
 }
 
@@ -60,7 +82,7 @@ fn NotFound() -> impl IntoView {
 #[component]
 fn Shell() -> impl IntoView {
     let navigate = use_navigate();
-    if api::token().is_none() {
+    if !desktop() && api::token().is_none() {
         navigate("/login", Default::default());
     }
     let me: Me = polled(Some(Duration::from_secs(10)), || async {
@@ -92,6 +114,7 @@ fn Shell() -> impl IntoView {
                             <li><A href="/admin">"Admin"</A></li>
                         </Show>
                     </ul>
+                    <Show when=|| !desktop()>
                     <div class="user-menu">
                         <A href="/account" attr:class="user-chip" attr:title="Your account">
                             <span class="avatar" aria-hidden="true">
@@ -102,6 +125,7 @@ fn Shell() -> impl IntoView {
                         </A>
                         <button type="button" class="nav-logout" on:click=logout>"Log out"</button>
                     </div>
+                    </Show>
                 </nav>
             </header>
             <main class="content">
@@ -113,6 +137,9 @@ fn Shell() -> impl IntoView {
 
 #[component]
 fn Login() -> impl IntoView {
+    if desktop() {
+        return view! { <Redirect path="/"/> }.into_any();
+    }
     let username = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
@@ -164,6 +191,7 @@ fn Login() -> impl IntoView {
             </form>
         </main>
     }
+    .into_any()
 }
 
 #[component]

@@ -1,0 +1,23 @@
+[package]
+name = "archipel-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Game servers on your own computer"
+
+[[bin]]
+name = "archipel-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+archipel = { path = "../archipel" }
+anyhow = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

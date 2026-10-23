@@ -164,6 +164,73 @@ pub struct ServerView {
     /// Started again when archipel starts (it was running).
     pub auto_start: bool,
     pub created_at: u64,
+    /// Whether players outside can reach it (the desktop app, which opens its
+    /// ports on the home router).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Reach>,
+}
+
+/// How archipel runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// On a server (facade): accounts, quotas, limits, servers restarted on boot.
+    Hosted,
+    /// The desktop app: one owner, no login, no limits, ports opened on the
+    /// home router.
+    Desktop,
+}
+
+/// `GET /api/about`, asked before logging in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct About {
+    pub mode: Mode,
+    pub version: String,
+}
+
+/// Whether a running server can be reached from the internet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reach {
+    pub state: ReachState,
+    /// How players at home connect: `192.168.1.20:30000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    /// How players anywhere connect, when they can: `86.245.1.2:30000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<String>,
+    /// The ports to forward by hand on the router, when it would not do it:
+    /// `UDP 30000`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward: Vec<String>,
+    /// What went wrong, in a few words: "the router has UPnP turned off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachState {
+    /// Asking the router.
+    Checking,
+    /// Friends can join from anywhere.
+    Internet,
+    /// The router did not open the ports: only the home network can join.
+    LocalOnly,
+    /// The connection has no public address of its own (carrier-grade NAT):
+    /// only the home network can join, whatever the router does.
+    NoPublicAddress,
+}
+
+/// `GET /api/servers/{id}/console/lines?after=N&wait=S`: the console's lines after
+/// line `after`, waiting up to `wait` seconds for some.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsoleLines {
+    pub lines: Vec<String>,
+    /// What to ask `after` next time.
+    pub next: u64,
+    /// The lines asked for are gone (too old, or the console restarted): these
+    /// replace what was shown.
+    pub reset: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
