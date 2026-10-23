@@ -220,6 +220,9 @@ pub fn ReachSummary(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
             };
             let (class, status) = match r.state {
                 ReachState::Checking => ("reach-status muted", "Opening ports on your router…"),
+                ReachState::Internet if r.firewall.is_some() => {
+                    ("reach-status reach-warn", "⚠ This PC's firewall turns friends away")
+                }
                 ReachState::Internet => ("reach-status reach-good", "✓ Friends can join"),
                 ReachState::LocalOnly => ("reach-status reach-warn", "⚠ Only your home network can join"),
                 ReachState::NoPublicAddress => {
@@ -250,6 +253,7 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
         {move || {
             let r = reach.get();
             let detail = r.detail.clone().map(|d| view! { <div class="small reach-detail">{d}</div> });
+            let firewall = r.firewall.clone().map(|f| view! { <p class="reach-firewall">{f}</p> });
             match r.state {
                 ReachState::Checking => view! {
                     <div class="note reach-panel" role="status">
@@ -257,11 +261,20 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
                         " Opening ports on your router…"
                     </div>
                 }.into_any(),
+                ReachState::Internet if r.firewall.is_some() => view! {
+                    <div class="note note-warning reach-panel" role="status">
+                        <strong>"⚠ Your router lets friends in, but this PC's firewall turns them away"</strong>
+                        {firewall}
+                        <span>"Then give them this address:"</span>
+                        {r.public.clone().or(r.local.clone()).map(|address| view! { <CopyAddress address/> })}
+                    </div>
+                }.into_any(),
                 ReachState::Internet => view! {
                     <div class="note note-good reach-panel" role="status">
                         <strong>"✓ Friends can join"</strong>
                         <span>" Give them this address:"</span>
                         {r.public.clone().or(r.local.clone()).map(|address| view! { <CopyAddress address/> })}
+                        {firewall}
                     </div>
                 }.into_any(),
                 ReachState::LocalOnly => {
@@ -284,6 +297,7 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
                                     "To let friends in, turn on UPnP in your router's settings, or forward {forward} to this PC{this_pc}."
                                 )}
                             </p>
+                            {firewall}
                             {detail}
                         </div>
                     }.into_any()
@@ -408,11 +422,21 @@ pub fn InternetCard() -> impl IntoView {
                     .map(|ip| format!(" ({ip})"))
                     .unwrap_or_default();
                 let detail = i.detail.clone().map(|d| view! { <div class="small reach-detail">{d}</div> });
+                let firewall = i
+                    .firewall
+                    .clone()
+                    .filter(|_| matches!(i.state, ReachState::Internet | ReachState::LocalOnly))
+                    .map(|f| view! { <p class="reach-firewall">{f}</p> });
                 let (class, title, body) = match i.state {
                     ReachState::Checking => (
                         "note reach-panel",
                         "Checking whether friends can reach this PC…".to_string(),
                         "archipel is asking your router to open a test port.".to_string(),
+                    ),
+                    ReachState::Internet if i.firewall.is_some() => (
+                        "note note-warning reach-panel",
+                        "⚠ Your router lets friends in, but this PC's firewall turns them away".to_string(),
+                        "Open the ports in the firewall (below), then friends can join from the internet.".to_string(),
                     ),
                     ReachState::Internet => (
                         "note note-good reach-panel",
@@ -443,6 +467,7 @@ pub fn InternetCard() -> impl IntoView {
                             {title}
                         </strong>
                         <p>{body}</p>
+                        {firewall}
                         {detail}
                         <button class="button button-small" on:click=check disabled=checking>
                             "Check again"

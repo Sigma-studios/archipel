@@ -93,7 +93,9 @@ and the same UI, in a window, for the one person using the computer:
   the system's: not your home folder, not the other servers. Without Landlock they
   run anyway, and their console says they are not confined.
 
-Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
+A firewall on the computer (NixOS's, on by default; firewalld; ufw) turns players
+away even when the router forwards: archipel says so, with how to open the pool in
+it, until it sees the ports open. Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
 the games archipel downloads (Java, SteamCMD, Urban Terror) are built for usual
 distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`. SteamCMD (Puck) needs 32-bit libraries on
 x86_64 (`lib32gcc-s1` on Debian and Ubuntu); Urban Terror and Puck need x86_64.

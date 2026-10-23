@@ -666,6 +666,7 @@ input:disabled, textarea:disabled { background: var(--surface-2); color: var(--t
 .reach-panel { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; white-space: normal; }
 .reach-panel p { margin: 0; }
 .internet-card { margin-bottom: 20px; }
+.reach-firewall { font-weight: 600; }
 .reach-panel .connect { background: var(--surface-1); }
 .reach-detail { opacity: 0.85; }
 .spinner-sm { width: 12px; height: 12px; border-width: 2px; display: inline-block; vertical-align: -1px; }

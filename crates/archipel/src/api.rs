@@ -545,6 +545,11 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
                         public,
                         forward,
                         detail: status.detail,
+                        firewall: app
+                            .cfg
+                            .port_range()
+                            .ok()
+                            .and_then(|(first, last)| crate::reach::firewall_hint(first, last)),
                     }),
                 )
             }
@@ -974,6 +979,7 @@ async fn internet(State(app): S, _: Caller) -> ApiResult<Json<Internet>> {
         public_ip: status.public_ip.map(|ip| ip.to_string()),
         ports: format!("{first}-{last}"),
         detail: status.detail,
+        firewall: crate::reach::firewall_hint(first, last),
     }))
 }
 

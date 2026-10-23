@@ -204,6 +204,10 @@ pub struct Internet {
     pub ports: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// A firewall on this computer that may turn players away, and how to open
+    /// the ports in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<String>,
 }
 
 /// Whether a running server can be reached from the internet.
@@ -223,6 +227,9 @@ pub struct Reach {
     /// What went wrong, in a few words: "the router has UPnP turned off".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// As [`Internet::firewall`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

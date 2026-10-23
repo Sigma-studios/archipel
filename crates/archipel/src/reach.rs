@@ -24,6 +24,9 @@ use igd_next::aio::tokio::Tokio;
 use parking_lot::Mutex;
 use tracing::{debug, info};
 
+/// Where UPnP devices listen for searches.
+const SSDP: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+
 /// Forwardings last this long on the router, renewed well before.
 const LEASE: Duration = Duration::from_secs(3600);
 const RENEW_EVERY: Duration = Duration::from_secs(20 * 60);
@@ -349,12 +352,28 @@ async fn natpmp_forward(gateway: Ipv4Addr, ip: Ipv4Addr, ports: &[u16]) -> Forwa
 }
 
 async fn upnp_forward(ip: Ipv4Addr, ports: &[u16]) -> Forwarded {
-    let mut options = igd_next::SearchOptions::default();
-    options.timeout = Some(Duration::from_secs(4));
-    options.single_search_timeout = Some(Duration::from_secs(2));
-    let gateway = igd_next::aio::tokio::search_gateway(options)
-        .await
-        .map_err(|e| anyhow!("no answer ({e})"))?;
+    let search = |to: SocketAddr, wait: u64| {
+        let mut options = igd_next::SearchOptions::default();
+        options.broadcast_address = to;
+        options.timeout = Some(Duration::from_secs(wait));
+        options.single_search_timeout = Some(Duration::from_secs(2));
+        igd_next::aio::tokio::search_gateway(options)
+    };
+    // The router itself first: its answer to a search sent to everyone comes from
+    // its own address, which a firewall here (NixOS's, by default) does not take
+    // for an answer and drops; to a search sent to it, it is one.
+    let found = match gateway() {
+        Some(router) => search(SocketAddr::V4(SocketAddrV4::new(router, 1900)), 2)
+            .await
+            .ok(),
+        None => None,
+    };
+    let gateway = match found {
+        Some(gateway) => gateway,
+        None => search(SocketAddr::V4(SocketAddrV4::new(SSDP, 1900)), 4)
+            .await
+            .map_err(|e| anyhow!("no answer ({e})"))?,
+    };
     let external = gateway.get_external_ip().await.ok();
     let via = Via::Upnp(gateway);
     if let Err(error) = map_all(&via, ip, ports).await {
@@ -529,6 +548,73 @@ pub fn local_ip() -> Option<Ipv4Addr> {
 }
 
 /// The router: the default route's gateway.
+/// A firewall on this computer that drops players' connections unless the ports
+/// are opened in it, and how to open them: NixOS's (on by default), firewalld's
+/// (Fedora's), ufw's (when turned on).
+pub fn firewall_hint(first: u16, last: u16) -> Option<String> {
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    let nixos_units = ["firewall.service", "nftables.service"]
+        .map(|u| std::path::Path::new("/etc/systemd/system").join(u));
+    // Without its units in sight (in appimage-run's sandbox), it may well be on.
+    let nixos_blocks = !exists("/etc/systemd/system")
+        || (nixos_units.iter().any(|u| u.exists())
+            && !nixos_units.iter().any(|u| opens(u, first, last)));
+    if exists("/etc/NIXOS") && nixos_blocks {
+        return Some(format!(
+            "NixOS's firewall turns players away unless these ports are open in it: add \
+             networking.firewall.allowedTCPPortRanges = [ {{ from = {first}; to = {last}; }} ]; \
+             and the same allowedUDPPortRanges to your configuration, then run nixos-rebuild switch."
+        ));
+    }
+    if exists("/run/firewalld") {
+        return Some(format!(
+            "firewalld turns players away unless these ports are open in it: run sudo \
+             firewall-cmd --permanent --add-port={first}-{last}/tcp \
+             --add-port={first}-{last}/udp, then sudo firewall-cmd --reload."
+        ));
+    }
+    let ufw_on = std::fs::read_to_string("/etc/ufw/ufw.conf")
+        .is_ok_and(|c| c.lines().any(|l| l.trim() == "ENABLED=yes"));
+    if ufw_on {
+        return Some(format!(
+            "ufw turns players away unless these ports are open in it: run sudo ufw allow \
+             {first}:{last}/tcp, then sudo ufw allow {first}:{last}/udp."
+        ));
+    }
+    None
+}
+
+/// Whether the NixOS firewall `unit` lets the pool in: its rules, in the scripts
+/// and files of the Nix store it runs, accept the range (`30000:30019` for
+/// iptables, `30000-30019` for nftables) for TCP and UDP.
+fn opens(unit: &std::path::Path, first: u16, last: u16) -> bool {
+    let ranges = [format!("{first}:{last}"), format!("{first}-{last}")];
+    let mut seen = std::collections::HashSet::new();
+    let mut files = vec![unit.to_path_buf()];
+    let (mut tcp, mut udp) = (false, false);
+    while let Some(file) = files.pop() {
+        if seen.len() > 50 || !seen.insert(file.clone()) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in text.lines() {
+            if ranges.iter().any(|r| line.contains(r.as_str())) {
+                tcp |= line.contains("tcp");
+                udp |= line.contains("udp");
+            }
+        }
+        // The files it refers to: /nix/store/<hash>-<name>[/…].
+        for word in text.split(|c: char| c.is_whitespace() || "\"';=()".contains(c)) {
+            if word.starts_with("/nix/store/") && seen.len() + files.len() < 50 {
+                files.push(word.into());
+            }
+        }
+    }
+    tcp && udp
+}
+
 fn gateway() -> Option<Ipv4Addr> {
     let routes = std::fs::read_to_string("/proc/net/route").ok()?;
     routes.lines().skip(1).find_map(|line| {
@@ -545,6 +631,35 @@ fn gateway() -> Option<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_whether_the_firewall_opens_the_pool() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/firewall-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let unit = dir.join("firewall.service");
+        std::fs::write(
+            &unit,
+            "ip46tables -A nixos-fw -p tcp --dport 30000:30019 -j nixos-fw-accept\n",
+        )
+        .unwrap();
+        assert!(!opens(&unit, 30000, 30019), "UDP is still closed");
+        std::fs::write(
+            &unit,
+            "ip46tables -A nixos-fw -p tcp --dport 30000:30019 -j nixos-fw-accept\n\
+             ip46tables -A nixos-fw -p udp --dport 30000:30019 -j nixos-fw-accept\n",
+        )
+        .unwrap();
+        assert!(opens(&unit, 30000, 30019));
+        assert!(!opens(&unit, 31000, 31019));
+        std::fs::write(
+            &unit,
+            "tcp dport { 30000-30019 } accept\nudp dport { 30000-30019 } accept\n",
+        )
+        .unwrap();
+        assert!(opens(&unit, 30000, 30019), "nftables");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn tells_who_can_reach() {
