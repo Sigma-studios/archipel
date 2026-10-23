@@ -268,6 +268,27 @@ fn check_password(password: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// A quota as far as the machine can honour it: no share is larger than what
+/// archipel has (its container's memory and CPU, its volume, its port pool, one
+/// port per server at least). Admins' "everything" reads as the machine itself.
+fn effective(app: &App, quota: &Quota) -> Quota {
+    let (_, cpu) = app.supervisor.cgroups().totals();
+    let memory = app.supervisor.memory_available_mb();
+    let disk = disk_space(&app.cfg.data_dir).map(|(total, _)| total / (1024 * 1024));
+    let ports = app
+        .cfg
+        .port_range()
+        .map(|(first, last)| u32::from(last - first) + 1)
+        .ok();
+    let min = |want: u64, have: Option<u64>| have.map_or(want, |h| want.min(h));
+    Quota {
+        memory_mb: min(quota.memory_mb, memory),
+        cpu_percent: min(u64::from(quota.cpu_percent), cpu.map(u64::from)) as u32,
+        max_servers: min(u64::from(quota.max_servers), ports.map(u64::from)) as u32,
+        disk_mb: min(quota.disk_mb, disk),
+    }
+}
+
 fn user_view(app: &App, user: &UserRow) -> UserView {
     let rows = app.store.list_servers().unwrap_or_default();
     let mine: Vec<&ServerRow> = rows.iter().filter(|r| r.owner_id == user.id).collect();
@@ -283,7 +304,7 @@ fn user_view(app: &App, user: &UserRow) -> UserView {
     UserView {
         username: user.username.clone(),
         role: user.role,
-        quota: user.quota.clone(),
+        quota: effective(app, &user.quota),
         usage: Usage {
             memory_mb: by_owner.get(&user.id).copied().unwrap_or(0),
             servers: mine.len() as u32,
@@ -456,10 +477,11 @@ async fn create_server(
             game.name, game.memory.min_mb
         )));
     }
-    if req.memory_mb > owner.quota.memory_mb {
+    let quota = effective(&app, &owner.quota);
+    if req.memory_mb > quota.memory_mb {
         return Err(bad(format!(
-            "that is more memory than {}'s quota ({} MB)",
-            owner.username, owner.quota.memory_mb
+            "that is more memory than {}'s share ({} MB)",
+            owner.username, quota.memory_mb
         )));
     }
     let count = app
@@ -468,10 +490,10 @@ async fn create_server(
         .iter()
         .filter(|r| r.owner_id == owner.id)
         .count();
-    if count as u32 >= owner.quota.max_servers {
+    if count as u32 >= quota.max_servers {
         return Err(refused(anyhow::anyhow!(
             "{} servers is as many as the quota allows: delete one first",
-            owner.quota.max_servers
+            quota.max_servers
         )));
     }
     let port_names: Vec<String> = game.ports.iter().map(|p| p.name.clone()).collect();
@@ -528,10 +550,11 @@ async fn update_server(
             .store
             .user_by_id(row.owner_id)?
             .context("the server's owner is gone")?;
-        if mb < game.memory.min_mb || mb > owner.quota.memory_mb {
+        let quota = effective(&app, &owner.quota);
+        if mb < game.memory.min_mb || mb > quota.memory_mb {
             return Err(bad(format!(
                 "memory must be between {} MB and the quota's {} MB",
-                game.memory.min_mb, owner.quota.memory_mb
+                game.memory.min_mb, quota.memory_mb
             )));
         }
         row.memory_mb = mb;
