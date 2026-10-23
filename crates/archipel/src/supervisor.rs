@@ -812,7 +812,22 @@ async fn missing_program(program: &Path, dir: &Path, uid: u32) -> String {
         .display()
         .to_string();
     if found.is_empty() {
-        format!("the game's program {shown} is not in the server's directory")
+        let root = dir.to_path_buf();
+        let mut top = fsops::as_user(uid, move || {
+            Ok(std::fs::read_dir(&root)?
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| !n.starts_with('.'))
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap_or_default();
+        top.sort();
+        top.truncate(40);
+        format!(
+            "the game's program {shown} is not in the server's directory, which holds: {}",
+            top.join(", ")
+        )
     } else {
         format!(
             "the game's program is not at {shown}; files of that name: {}",
