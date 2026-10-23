@@ -9,13 +9,14 @@
 //!         └── s<server>/    a server: memory.max, pids.max
 //! ```
 //!
-//! Without delegation (an older facade, or running elsewhere) servers run without
-//! limits, and the machine page says so.
+//! Without delegation (an older facade, `--delegate-cgroups` off, or elsewhere)
+//! archipel starts no server: nothing would hold each one to its share. The
+//! machine page and every start say why.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use archipel_core::api::Quota;
 use tracing::{info, warn};
 
@@ -26,7 +27,7 @@ const SERVER_PIDS: u32 = 4096;
 
 pub struct Cgroups {
     root: PathBuf,
-    /// Why limits are not enforced, when they are not.
+    /// Why servers cannot start, when the cgroup is not archipel's.
     off: Option<String>,
 }
 
@@ -37,11 +38,15 @@ impl Cgroups {
         let root = PathBuf::from(ROOT);
         let mut cgroups = Cgroups { root, off: None };
         if !cfg!(target_os = "linux") {
-            cgroups.off = Some("archipel runs on Linux only: limits are not enforced".into());
+            cgroups.off = Some("archipel runs on Linux only".into());
             return cgroups;
         }
         if !cgroups.root.join("cgroup.controllers").exists() {
-            cgroups.off = Some("no cgroup v2 here: memory and CPU limits are not enforced".into());
+            cgroups.off = Some(
+                "the machine has no cgroup v2, which archipel needs to hold each server to its \
+                 memory and CPU"
+                    .into(),
+            );
             return cgroups;
         }
         let mut writable = false;
@@ -58,8 +63,9 @@ impl Cgroups {
         }
         if !writable {
             cgroups.off = Some(
-                "the container's cgroup is not delegated to archipel, so memory and CPU limits \
-                 are not enforced: set `--delegate-cgroups true` on archipel's facade app"
+                "the container's cgroup is not delegated to archipel, which it needs to hold \
+                 each server to its memory and CPU: set `--delegate-cgroups true` on archipel's \
+                 facade app"
                     .into(),
             );
             return cgroups;
@@ -115,6 +121,14 @@ impl Cgroups {
         self.off.clone()
     }
 
+    /// Fails, saying why, when servers cannot have their limits.
+    pub fn require(&self) -> anyhow::Result<()> {
+        match &self.off {
+            Some(why) => bail!("servers cannot start here: {why}"),
+            None => Ok(()),
+        }
+    }
+
     /// The container's memory (bytes) and CPU (100 per core), as facade limits it.
     pub fn totals(&self) -> (Option<u64>, Option<u32>) {
         let read = |f: &str| std::fs::read_to_string(self.root.join(f)).ok();
@@ -165,15 +179,8 @@ impl Cgroups {
 
     /// A cgroup for a server about to start, inside its owner's: the
     /// `cgroup.procs` file its process joins.
-    pub fn create_server(
-        &self,
-        user: i64,
-        server: u64,
-        memory_mb: u64,
-    ) -> anyhow::Result<Option<PathBuf>> {
-        if !self.enforced() {
-            return Ok(None);
-        }
+    pub fn create_server(&self, user: i64, server: u64, memory_mb: u64) -> anyhow::Result<PathBuf> {
+        self.require()?;
         let dir = self.user_dir(user).join(format!("s{server}"));
         if !dir.exists() {
             std::fs::create_dir(&dir)?;
@@ -184,7 +191,7 @@ impl Cgroups {
             write(&dir, "memory.swap.max", "0")?;
         }
         write(&dir, "pids.max", &SERVER_PIDS.to_string())?;
-        Ok(Some(dir.join("cgroup.procs")))
+        Ok(dir.join("cgroup.procs"))
     }
 
     /// Kills every process left in a server's cgroup.

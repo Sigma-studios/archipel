@@ -199,6 +199,7 @@ impl Supervisor {
         if self.0.shutting_down.load(Ordering::Relaxed) {
             bail!("archipel is shutting down");
         }
+        self.0.cgroups.require()?;
         let row = self.0.store.get_server(id)?.context("no such server")?;
         let game = self.game(&row)?;
         let owner = self
@@ -344,10 +345,10 @@ impl Supervisor {
         fsops::ensure_server_dir(&dir, uid).context("preparing the server's directory")?;
         self.0.cgroups.ensure_user(owner.id, &owner.quota)?;
         let procs = self.0.cgroups.create_server(owner.id, id, row.memory_mb)?;
-        *inst.cgroup.lock() = procs.clone();
+        *inst.cgroup.lock() = Some(procs.clone());
         let run_as = RunAs {
             uid,
-            cgroup: procs.clone(),
+            cgroup: Some(procs),
         };
 
         inst.set(ServerState::Installing, None);

@@ -233,8 +233,8 @@ pub struct Overview {
     pub memory_used_mb: u64,
     pub disk_total_bytes: Option<u64>,
     pub disk_used_bytes: Option<u64>,
-    /// Whether each server's memory and CPU are enforced (cgroups delegated to
-    /// archipel), and if not, why.
+    /// Whether servers can start: archipel holds each one to its memory and CPU
+    /// (facade delegates cgroups to it), and if not, why.
     pub limits_enforced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits_note: Option<String>,

@@ -72,7 +72,7 @@ and the ports are published there. The node must run x86_64 for Urban Terror and
   so a planted symlink leads nowhere.
 * Each one has a cgroup with a memory limit, no swap and a process limit, inside its
   owner's cgroup holding their memory and CPU quota. Without cgroup delegation (older
-  facade, or `--delegate-cgroups` off), servers run without limits and the Machine page
+  facade, or `--delegate-cgroups` off), archipel starts no server, and the Machine page
   says so.
 * If memory runs out anyway, the kernel ends a game server before archipel.
 

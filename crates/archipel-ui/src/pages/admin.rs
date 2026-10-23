@@ -480,8 +480,8 @@ fn MachineTab() -> impl IntoView {
                     } else {
                         view! {
                             <div class="note note-warning" role="alert">
-                                <strong>"⚠ Limits are not enforced. "</strong>
-                                "Quotas still decide who may start what, but a server can use more memory or CPU than it was given."
+                                <strong>"⚠ Servers cannot start. "</strong>
+                                "archipel holds every server to its share of memory and CPU, and cannot here:"
                                 {o.limits_note.clone().map(|n| view! { <div class="small">{n}</div> })}
                             </div>
                         }.into_any()
