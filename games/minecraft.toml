@@ -47,10 +47,11 @@ options = [
 [[settings]]
 key = "version"
 label = "Version"
-help = "A Minecraft version like 1.21.4, or latest. Players need the same one."
-type = "text"
+help = "Players need the same one. Latest follows new releases when the server is reinstalled."
+type = "choice"
 default = "latest"
-max_len = 20
+options = [{ value = "latest", label = "Latest release" }]
+options_from = "minecraft_versions"
 reinstall = true
 
 [[settings]]

@@ -116,6 +116,10 @@ editable = true                 # its owner can edit it in the Files tab
 set = { port = "{port.game}", name = "{setting.name}" }
 ```
 
+A `choice` can also list options archipel fetches itself, after its own: with
+`options_from = "minecraft_versions"`, Minecraft's releases, newest first (those
+Paper builds when the `flavor` setting is `paper`).
+
 Installs are `minecraft`, `shared` (an archive downloaded once, read-only for every
 server: `{base}`) or `steamcmd` (`app_id`, anonymous login, in each server's
 directory). Templates use `{port.<name>}`, `{setting.<key>}`, `{memory_mb}`,

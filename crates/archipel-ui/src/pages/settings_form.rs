@@ -4,10 +4,11 @@
 use std::collections::BTreeMap;
 
 use archipel_core::api::Value;
-use archipel_core::game::{GameDef, SettingDef, SettingKind};
+use archipel_core::game::{ChoiceOption, GameDef, SettingDef, SettingKind};
 use leptos::prelude::*;
 
-use crate::util::mb;
+use crate::api;
+use crate::util::{mb, polled};
 
 pub type Values = BTreeMap<String, Value>;
 
@@ -35,16 +36,33 @@ pub fn SettingsFields(
     if game.settings.is_empty() {
         return view! { <p class="muted">"This game has nothing to set up."</p> }.into_any();
     }
+    // Listed options may depend on the other choices (Paper builds fewer versions).
+    let choices: Vec<String> = game
+        .settings
+        .iter()
+        .filter(|s| matches!(s.kind, SettingKind::Choice { .. }))
+        .map(|s| s.key.clone())
+        .collect();
+    let game_id = game.id.clone();
     view! {
         <div class="form-grid">
-            {game.settings.into_iter().map(|def| view! { <SettingField def values editing/> }).collect_view()}
+            {game.settings.into_iter().map(|def| {
+                let (game_id, choices) = (game_id.clone(), choices.clone());
+                view! { <SettingField def values editing game_id choices/> }
+            }).collect_view()}
         </div>
     }
     .into_any()
 }
 
 #[component]
-fn SettingField(def: SettingDef, values: RwSignal<Values>, editing: bool) -> impl IntoView {
+fn SettingField(
+    def: SettingDef,
+    values: RwSignal<Values>,
+    editing: bool,
+    game_id: String,
+    choices: Vec<String>,
+) -> impl IntoView {
     let id = format!("setting-{}", def.key);
     let key = StoredValue::new(def.key.clone());
     let fallback = StoredValue::new(def.default_value());
@@ -153,6 +171,61 @@ fn SettingField(def: SettingDef, values: RwSignal<Values>, editing: bool) -> imp
             </div>
         }
         .into_any(),
+        SettingKind::Choice {
+            options,
+            options_from: Some(_),
+            ..
+        } => {
+            // archipel lists the options, after the other choices made so far.
+            let path = StoredValue::new(format!("/api/games/{game_id}/options/{}", def.key));
+            let others = StoredValue::new(choices);
+            let listed = polled(None, move || {
+                let query = values.with(|v| {
+                    others.with_value(|keys| {
+                        keys.iter()
+                            .filter(|k| key.with_value(|me| *k != me))
+                            .filter_map(|k| v.get(k).map(|val| (k, val.as_text())))
+                            .map(|(k, val)| format!("{}={}", encode(k), encode(&val)))
+                            .collect::<Vec<_>>()
+                            .join("&")
+                    })
+                });
+                let url = format!("{}?{query}", path.get_value());
+                async move { api::get::<Vec<ChoiceOption>>(&url).await }
+            });
+            let fallback_options = StoredValue::new(options);
+            let shown = move || {
+                let mut all = listed
+                    .data
+                    .get()
+                    .unwrap_or_else(|| fallback_options.get_value());
+                // The current value stays choosable, listed or not (yet).
+                let now = current().as_text();
+                if !all.iter().any(|o| o.value == now) {
+                    all.insert(0, ChoiceOption { label: now.clone(), value: now });
+                }
+                all
+            };
+            view! {
+                <div class="field">
+                    {label}
+                    <select id=id prop:value=move || current().as_text()
+                        on:change=move |ev| set(Value::Text(event_target_value(&ev)))>
+                        {move || shown().into_iter().map(|o| {
+                            let value = o.value.clone();
+                            view! {
+                                <option value=o.value selected=move || current().as_text() == value>{o.label}</option>
+                            }
+                        }).collect_view()}
+                    </select>
+                    {move || listed.error.get().map(|_| view! {
+                        <small class="field-help">"The list of versions is unavailable right now."</small>
+                    })}
+                    {help}{link}{reinstall}
+                </div>
+            }
+            .into_any()
+        }
         SettingKind::Choice { options, .. } if segmented(&options) => {
             let label_id = format!("{id}-label");
             view! {
@@ -194,6 +267,10 @@ fn SettingField(def: SettingDef, values: RwSignal<Values>, editing: bool) -> imp
         }
         .into_any(),
     }
+}
+
+fn encode(s: &str) -> String {
+    String::from(js_sys::encode_uri_component(s))
 }
 
 /// Memory as a slider from `min` to `max`, in 128 MB steps.

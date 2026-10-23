@@ -138,6 +138,10 @@ impl Supervisor {
         &self.0.cgroups
     }
 
+    pub fn installer(&self) -> &Installer {
+        &self.0.installer
+    }
+
     pub fn instance(&self, id: u64) -> Arc<Instance> {
         self.0
             .instances

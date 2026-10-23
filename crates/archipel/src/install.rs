@@ -56,7 +56,16 @@ pub struct Installer {
     http: reqwest::Client,
     /// One download of a shared file at a time.
     locks: parking_lot::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    /// Minecraft releases (all, and those Paper builds), newest first, and when
+    /// they were asked for.
+    versions: tokio::sync::Mutex<Option<Versions>>,
 }
+
+/// When they were asked for, every release, and those Paper builds.
+type Versions = (std::time::Instant, Vec<String>, Vec<String>);
+
+/// How long the lists of Minecraft versions are reused.
+const VERSIONS_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Where an install's own processes go (the server's cgroup), and as whom.
 pub struct RunAs {
@@ -73,6 +82,37 @@ impl Installer {
             cfg,
             http,
             locks: Default::default(),
+            versions: Default::default(),
+        })
+    }
+
+    /// Minecraft releases, newest first: those Paper builds with `paper`.
+    pub async fn minecraft_versions(&self, paper: bool) -> anyhow::Result<Vec<String>> {
+        let mut cached = self.versions.lock().await;
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|(at, _, _)| at.elapsed() < VERSIONS_FOR);
+        if !fresh {
+            let manifest: MojangManifest = self.json(MOJANG_MANIFEST).await?;
+            let releases: Vec<String> = manifest
+                .versions
+                .into_iter()
+                .filter(|v| v.kind == "release")
+                .map(|v| v.id)
+                .collect();
+            let builds = self.json::<PaperProject>(PAPER).await?.all();
+            let with_paper = releases
+                .iter()
+                .filter(|r| builds.contains(r))
+                .cloned()
+                .collect();
+            *cached = Some((std::time::Instant::now(), releases, with_paper));
+        }
+        let (_, all, with_paper) = cached.as_ref().expect("filled above");
+        Ok(if paper {
+            with_paper.clone()
+        } else {
+            all.clone()
         })
     }
 

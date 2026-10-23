@@ -162,8 +162,15 @@ pub enum SettingKind {
     Choice {
         default: String,
         options: Vec<ChoiceOption>,
+        /// More options archipel lists itself, after these: `minecraft_versions`
+        /// (releases, newest first, those Paper builds when `flavor` is `paper`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options_from: Option<String>,
     },
 }
+
+/// The option sources archipel knows, for `options_from`.
+pub const OPTION_SOURCES: &[&str] = &["minecraft_versions"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChoiceOption {
@@ -223,9 +230,22 @@ impl SettingDef {
                 Value::Number(n)
             }
             (SettingKind::Toggle { .. }, v) => Value::Bool(v.as_bool()),
-            (SettingKind::Choice { options, .. }, v) => {
+            (
+                SettingKind::Choice {
+                    options,
+                    options_from,
+                    ..
+                },
+                v,
+            ) => {
                 let text = v.as_text();
-                if !options.iter().any(|o| o.value == text) {
+                // Listed options change over time (new releases): one gone from the
+                // list still names something, and installing it says if not.
+                let listed = options_from.is_some()
+                    && !text.is_empty()
+                    && text.len() <= 64
+                    && !text.contains(char::is_whitespace);
+                if !listed && !options.iter().any(|o| o.value == text) {
                     return Err(format!("{label}: `{text}` is not one of the choices"));
                 }
                 Value::Text(text)
@@ -368,13 +388,27 @@ impl GameDef {
                     s.key
                 )));
             }
-            if let SettingKind::Choice { default, options } = &s.kind
-                && !options.iter().any(|o| &o.value == default)
+            if let SettingKind::Choice {
+                default,
+                options,
+                options_from,
+            } = &s.kind
             {
-                return Err(at(format!(
-                    "setting {}: the default is not a choice",
-                    s.key
-                )));
+                if !options.iter().any(|o| &o.value == default) {
+                    return Err(at(format!(
+                        "setting {}: the default is not a choice",
+                        s.key
+                    )));
+                }
+                if let Some(from) = options_from
+                    && !OPTION_SOURCES.contains(&from.as_str())
+                {
+                    return Err(at(format!(
+                        "setting {}: options_from `{from}` is not one of {}",
+                        s.key,
+                        OPTION_SOURCES.join(", ")
+                    )));
+                }
             }
         }
         if self.run.command.is_empty() {

@@ -45,6 +45,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/me", get(me))
         .route("/api/me/password", put(change_password))
         .route("/api/games", get(games))
+        .route("/api/games/{game}/options/{key}", get(setting_options))
         .route("/api/servers", get(list_servers).post(create_server))
         .route(
             "/api/servers/{id}",
@@ -297,6 +298,59 @@ fn user_view(app: &App, user: &UserRow) -> UserView {
 
 async fn games(State(app): S, _: Caller) -> Json<Vec<GameDef>> {
     Json(app.games.list())
+}
+
+/// The choices of a setting whose options archipel lists (`options_from`), given
+/// the other settings chosen so far (query parameters): the definition's own
+/// options, then the listed ones.
+async fn setting_options(
+    State(app): S,
+    _: Caller,
+    Path((game, key)): Path<(String, String)>,
+    Query(chosen): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<Vec<archipel_core::game::ChoiceOption>>> {
+    use archipel_core::game::{ChoiceOption, SettingKind};
+    let def = app
+        .games
+        .get(&game)
+        .and_then(|g| g.setting(&key))
+        .ok_or_else(|| not_found(format!("no setting {key} in {game}")))?;
+    let SettingKind::Choice {
+        options,
+        options_from: Some(from),
+        ..
+    } = &def.kind
+    else {
+        return Err(not_found(format!("{key} has no listed options")));
+    };
+    let listed = match from.as_str() {
+        "minecraft_versions" => {
+            let paper = chosen.get("flavor").is_some_and(|f| f == "paper");
+            app.supervisor
+                .installer()
+                .minecraft_versions(paper)
+                .await
+                .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?
+        }
+        other => return Err(not_found(format!("no option source {other}"))),
+    };
+    let newest = listed.first().cloned();
+    let mut out: Vec<ChoiceOption> = options
+        .iter()
+        .map(|o| ChoiceOption {
+            // "Latest release (26.3)": what latest means right now.
+            label: match (&newest, o.value.as_str()) {
+                (Some(v), "latest") => format!("{} ({v})", o.label),
+                _ => o.label.clone(),
+            },
+            value: o.value.clone(),
+        })
+        .collect();
+    out.extend(listed.into_iter().map(|v| ChoiceOption {
+        label: v.clone(),
+        value: v,
+    }));
+    Ok(Json(out))
 }
 
 /// The server `id`, if the caller may see it.
