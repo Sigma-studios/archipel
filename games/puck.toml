@@ -4,10 +4,8 @@ name = "Puck"
 description = "Physics-based online hockey. The dedicated server comes from Steam."
 badge = "🏒"
 memory = { min_mb = 1024, default_mb = 1536 }
-ports = [
-  { name = "game", protocol = "udp", label = "Game" },
-  { name = "ping", protocol = "udp", label = "Ping" },
-]
+# One port, for UDP and TCP alike.
+ports = [{ name = "game", protocol = "udp", label = "Game" }]
 install = { kind = "steamcmd", app_id = 3481440 }
 connect = "{host}:{port.game}"
 
@@ -17,7 +15,7 @@ command = ["./Puck", "-batchmode", "-nographics"]
 env = { LD_LIBRARY_PATH = "{dir}" }
 stop_signal = "SIGINT"
 stop_timeout_secs = 20
-ready = "Server authenticated"
+ready = "is ready to accept clients"
 
 [[settings]]
 key = "name"
@@ -30,7 +28,7 @@ max_len = 64
 key = "max_players"
 label = "Players"
 type = "number"
-default = 10
+default = 12
 min = 2
 max = 32
 
@@ -52,43 +50,37 @@ label = "Voice chat"
 type = "toggle"
 default = false
 
+[[settings]]
+key = "whitelist"
+label = "Only whitelisted players can join"
+help = "Their Steam IDs go in whitelisted_steam_ids.json."
+type = "toggle"
+default = false
+
 [[files]]
-path = "server_configuration.json"
+path = "server_config.json"
 label = "Server configuration"
 format = "json"
 editable = true
-set = { port = "{port.game}", pingPort = "{port.ping}", name = "{setting.name}", maxPlayers = "{setting.max_players}", password = "{setting.password}", isPublic = "{setting.public}", voip = "{setting.voip}" }
+set = { port = "{port.game}", name = "{setting.name}", maxPlayers = "{setting.max_players}", password = "{setting.password}", isPublic = "{setting.public}", useVoip = "{setting.voip}", useWhitelist = "{setting.whitelist}" }
 initial = """
 {
   "port": 7777,
-  "pingPort": 7778,
   "name": "An archipel server",
-  "maxPlayers": 10,
-  "password": "",
-  "voip": false,
+  "maxPlayers": 12,
+  "password": null,
+  "tickRate": 200,
   "isPublic": true,
-  "adminSteamIds": [],
-  "reloadBannedSteamIds": false,
-  "usePuckBannedSteamIds": true,
-  "printMetrics": true,
-  "kickTimeout": 300,
-  "sleepTimeout": 60,
-  "joinMidMatchDelay": 10,
-  "targetFrameRate": 120,
-  "serverTickRate": 100,
-  "clientTickRate": 200,
-  "startPaused": false,
-  "allowVoting": true,
-  "phaseDurationMap": {
-    "Warmup": 600,
-    "FaceOff": 3,
-    "Playing": 300,
-    "BlueScore": 5,
-    "RedScore": 5,
-    "Replay": 10,
-    "PeriodOver": 15,
-    "GameOver": 15
-  },
-  "mods": []
+  "useVoip": false,
+  "useWhitelist": false,
+  "mods": [],
+  "gameMode": "public",
+  "level": "default"
 }
 """
+
+[[files]]
+path = "public_game_mode_config.json"
+label = "Game mode (public): phase durations"
+format = "json"
+editable = true
