@@ -65,6 +65,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/internet", get(internet))
         .route("/api/internet/check", post(check_internet))
+        .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/probe", post(probe))
         .route("/api/users", get(list_users).post(create_user))
         .route(
@@ -998,6 +999,36 @@ async fn check_internet(State(app): S, caller: Caller) -> ApiResult<Json<Interne
     // It says `checking` until done.
     app.supervisor.check_internet();
     internet(State(app), caller).await
+}
+
+/// The desktop app's settings: checking from outside, the hostname for friends.
+async fn get_settings(State(app): S, _: Caller) -> ApiResult<Json<Settings>> {
+    desktop_only(&app)?;
+    Ok(Json(crate::reach::settings(&app.store)?))
+}
+
+/// Saves them; a change checks again at once, so the result shows.
+async fn put_settings(
+    State(app): S,
+    _: Caller,
+    Json(req): Json<Settings>,
+) -> ApiResult<Json<Settings>> {
+    desktop_only(&app)?;
+    let saved = crate::reach::Saved::from(&req).map_err(bad)?;
+    let before = crate::reach::settings(&app.store)?;
+    saved.save(&app.store)?;
+    let after = crate::reach::settings(&app.store)?;
+    if after != before {
+        app.supervisor.check_internet();
+    }
+    Ok(Json(after))
+}
+
+fn desktop_only(app: &App) -> ApiResult<()> {
+    match app.supervisor.reacher() {
+        Some(_) => Ok(()),
+        None => Err(not_found("only the desktop app has these settings")),
+    }
 }
 
 /// The connection's peer, when archipel serves over HTTP (not to the desktop's
