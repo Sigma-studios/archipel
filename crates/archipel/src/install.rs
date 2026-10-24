@@ -69,6 +69,7 @@ pub struct Installer {
     /// Minecraft releases (all, and those Paper builds), newest first, and when
     /// they were asked for.
     versions: tokio::sync::Mutex<Option<Versions>>,
+    steam: crate::workshop::Steam,
 }
 
 /// When they were asked for, every release, and those Paper builds.
@@ -95,7 +96,17 @@ impl Installer {
             http,
             locks: Default::default(),
             versions: Default::default(),
+            steam: Default::default(),
         })
+    }
+
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// What Steam says about Workshop items.
+    pub fn workshop(&self) -> &crate::workshop::Steam {
+        &self.steam
     }
 
     /// Minecraft releases, newest first: those Paper builds with `paper`.

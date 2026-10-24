@@ -183,6 +183,10 @@ fn SettingField(
             // archipel lists the options, after the other choices made so far.
             let path = StoredValue::new(format!("/api/games/{game_id}/options/{}", def.key));
             let others = StoredValue::new(choices);
+            // The other choices the list was first asked with: once they change
+            // (another gamemode), a value the new list lacks gives way to its first.
+            let first_query = StoredValue::new(None::<String>);
+            let others_changed = StoredValue::new(false);
             let listed = polled(None, move || {
                 let mut query = values.with(|v| {
                     others.with_value(|keys| {
@@ -195,8 +199,27 @@ fn SettingField(
                 });
                 query.extend(server.map(|id| format!("_server={id}")));
                 let query = query.join("&");
+                match first_query.get_value() {
+                    None => first_query.set_value(Some(query.clone())),
+                    Some(first) if first != query => others_changed.set_value(true),
+                    Some(_) => {}
+                }
                 let url = format!("{}?{query}", path.get_value());
                 async move { api::get::<Vec<ChoiceOption>>(&url).await }
+            });
+            Effect::new(move |_| {
+                let Some(list) = listed.data.get() else { return };
+                if !others_changed.get_value() {
+                    return;
+                }
+                let now = values
+                    .with_untracked(|v| key.with_value(|k| v.get(k).map(Value::as_text)))
+                    .unwrap_or_default();
+                if !list.iter().any(|o| o.value == now)
+                    && let Some(first) = list.first()
+                {
+                    set(Value::Text(first.value.clone()));
+                }
             });
             let fallback_options = StoredValue::new(options);
             let shown = move || {

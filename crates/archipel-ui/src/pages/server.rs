@@ -13,6 +13,7 @@ use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use super::addons::AddonsTab;
 use super::servers::{badge_of, reach_of};
 use super::settings_form::{MemoryField, SettingsFields, defaults};
+use super::workshop::WorkshopTab;
 use crate::api;
 use crate::components::{
     ConnectAddress, ErrorNote, GameBadge, Loading, Modal, PowerButton, ReachPanel, StateBadge,
@@ -78,6 +79,9 @@ pub fn ServerPage() -> impl IntoView {
     let tabs = Memo::new(move |_| {
         let mut tabs: Vec<(&'static str, String)> =
             TABS.iter().map(|(k, l)| (*k, l.to_string())).collect();
+        if game.with(|g| g.as_ref().is_some_and(|g| g.workshop.is_some())) {
+            tabs.push(("workshop", "Workshop".into()));
+        }
         if let Some(label) = game.with(|g| {
             g.as_ref()
                 .and_then(|g| g.addons.as_ref())
@@ -214,6 +218,9 @@ pub fn ServerPage() -> impl IntoView {
                             </Show>
                         }.into_any(),
                         "files" => view! { <FilesTab id/> }.into_any(),
+                        "workshop" => view! {
+                            <WorkshopTab id server=current on_tab=Callback::new(move |t: &'static str| set_tab(t))/>
+                        }.into_any(),
                         "addons" => match game.get().and_then(|g| g.addons) {
                             Some(def) => view! {
                                 <AddonsTab id def server=current on_tab=Callback::new(move |t: &'static str| set_tab(t))/>

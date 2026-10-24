@@ -240,7 +240,8 @@ impl Supervisor {
         if inst.is_active() {
             bail!("{} is already {}", row.name, inst.status().state);
         }
-        game.settings_from(&row.settings).map_err(|e| anyhow!(e))?;
+        game.stored_settings(&row.settings)
+            .map_err(|e| anyhow!(e))?;
         if row.memory_mb < game.memory.min_mb {
             bail!("{} needs at least {} MB", game.name, game.memory.min_mb);
         }
@@ -424,7 +425,9 @@ impl Supervisor {
             .store
             .user_by_id(row.owner_id)?
             .context("the server's owner is gone")?;
-        let settings = game.settings_from(&row.settings).map_err(|e| anyhow!(e))?;
+        let mut settings = game
+            .stored_settings(&row.settings)
+            .map_err(|e| anyhow!(e))?;
         let dir = self.0.cfg.server_dir(id);
         let uid = fsops::uid_of(id);
         fsops::ensure_server_dir(&dir, uid).context("preparing the server's directory")?;
@@ -472,7 +475,33 @@ impl Supervisor {
             self.0.store.set_installed(id, json.as_deref())?;
         }
 
-        let ctx = context(
+        // The Workshop items it downloads at start, and its gamemode's settings.
+        let workshop_config = match &game.workshop {
+            Some(w) => {
+                let config = crate::workshop::prepare(
+                    w,
+                    self.0.installer.workshop(),
+                    self.0.installer.http(),
+                    &mut settings,
+                    &dir,
+                    uid,
+                    &inst.console,
+                )
+                .await?;
+                // A first map the gamemode cannot play gave way: its settings say so.
+                if settings.get(&w.map_setting) != row.settings.get(&w.map_setting)
+                    && let Some(mut fresh) = self.0.store.get_server(id)?
+                {
+                    if let Some(map) = settings.get(&w.map_setting) {
+                        fresh.settings.insert(w.map_setting.clone(), map.clone());
+                    }
+                    self.0.store.update_server(&fresh)?;
+                }
+                Some(config)
+            }
+            None => None,
+        };
+        let mut ctx = context(
             &game,
             &row,
             &settings,
@@ -480,6 +509,9 @@ impl Supervisor {
             ready.java.as_deref(),
             ready.base.as_deref(),
         );
+        if let Some(config) = workshop_config {
+            ctx.insert("workshop.config".into(), Value::Text(config));
+        }
         files::write_all(&game, &dir, uid, &ctx).await?;
         let words: Vec<String> = game
             .run

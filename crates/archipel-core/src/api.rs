@@ -462,6 +462,77 @@ pub struct InstallAddon {
     pub id: String,
 }
 
+/// A server's Steam Workshop items (Garry's Mod).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopView {
+    /// What the gamemode chosen brings, if archipel knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<WorkshopPresetView>,
+    /// The ones its owner added, in order.
+    pub items: Vec<WorkshopItem>,
+    /// Steam did not answer: the items show their ids only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopPresetView {
+    /// The gamemode setting's label for it: "Trouble in Terrorist Town".
+    pub gamemode: String,
+    /// Its items besides maps (the gamemode, a map vote).
+    pub items: Vec<WorkshopItem>,
+    pub maps: Vec<WorkshopPresetMap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopPresetMap {
+    pub id: String,
+    pub map: String,
+    pub label: String,
+    pub mb: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkshopKind {
+    Collection,
+    Map,
+    Gamemode,
+    Addon,
+}
+
+/// A Workshop item, as Steam describes it, and what the server found in it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopItem {
+    pub id: String,
+    pub title: String,
+    pub kind: WorkshopKind,
+    /// Its download.
+    pub bytes: u64,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_url: Option<String>,
+    /// A collection's items.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+    /// Why the server will not get it: private, removed, another game's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// Maps and gamemodes in it, once the server downloaded it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gamemodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Adds a Workshop item or collection, by its link or id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddWorkshopItem {
+    pub link: String,
+}
+
 /// What an install added.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstalledAddons {
