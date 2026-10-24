@@ -3,4 +3,5 @@ pub mod admin;
 pub mod new_server;
 pub mod server;
 pub mod servers;
+pub mod settings;
 pub mod settings_form;
