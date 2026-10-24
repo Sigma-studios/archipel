@@ -33,6 +33,8 @@ pub struct App {
     pub store: Arc<Store>,
     pub games: Arc<Games>,
     pub supervisor: Supervisor,
+    /// Checks desktops from outside, when turned on (`ARCHIPEL_PROBE`, hosted).
+    pub prober: Option<crate::probe::Prober>,
 }
 
 type S = State<Arc<App>>;
@@ -63,6 +65,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/internet", get(internet))
         .route("/api/internet/check", post(check_internet))
+        .route("/api/probe", post(probe))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{username}",
@@ -144,6 +147,9 @@ fn not_found(msg: impl ToString) -> ApiError {
 }
 fn forbidden(msg: impl ToString) -> ApiError {
     ApiError(StatusCode::FORBIDDEN, msg.to_string())
+}
+fn too_many(msg: impl ToString) -> ApiError {
+    ApiError(StatusCode::TOO_MANY_REQUESTS, msg.to_string())
 }
 /// A refusal of what was asked, with its reason.
 fn refused(e: anyhow::Error) -> ApiError {
@@ -992,6 +998,51 @@ async fn check_internet(State(app): S, caller: Caller) -> ApiResult<Json<Interne
     // It says `checking` until done.
     app.supervisor.check_internet();
     internet(State(app), caller).await
+}
+
+/// The connection's peer, when archipel serves over HTTP (not to the desktop's
+/// window).
+struct Peer(Option<std::net::SocketAddr>);
+
+impl FromRequestParts<Arc<App>> for Peer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &Arc<App>) -> Result<Self, Self::Rejection> {
+        Ok(Peer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0),
+        ))
+    }
+}
+
+/// Checks from the internet that the caller's port reaches it (hosted, when turned
+/// on): no account needed, desktops have none here.
+async fn probe(
+    State(app): S,
+    Peer(peer): Peer,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ProbeRequest>,
+) -> ApiResult<Json<ProbeResponse>> {
+    use crate::probe::Refusal;
+    let prober = app
+        .prober
+        .as_ref()
+        .ok_or_else(|| not_found("this archipel does not check from outside"))?;
+    let real_ip = headers.get("x-real-ip").and_then(|v| v.to_str().ok());
+    let caller = peer
+        .and_then(|p| crate::probe::caller_ip(p.ip(), real_ip))
+        .ok_or_else(|| bad("archipel cannot tell your address"))?;
+    match prober.check(caller, req).await {
+        Ok(response) => Ok(Json(response)),
+        Err(Refusal::Bad(why)) => Err(bad(why)),
+        Err(Refusal::TooMany) => Err(too_many("checked too often: try again in a few minutes")),
+        Err(Refusal::Busy) => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many checks at once: try again in a minute".into(),
+        )),
+    }
 }
 
 /// Total and used bytes of the filesystem holding `path`.

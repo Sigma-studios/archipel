@@ -1,8 +1,8 @@
 # archipel HTTP API
 
 JSON bodies are the types of `crates/archipel-core/src/api.rs` (and `GameDef` from
-`game.rs`). Every endpoint but `POST /api/login` and `GET /api/about` wants
-`Authorization: Bearer <token>`. Errors are `ErrorBody { error }` with a 4xx/5xx
+`game.rs`). Every endpoint but `POST /api/login`, `GET /api/about` and
+`POST /api/probe` wants `Authorization: Bearer <token>`. Errors are `ErrorBody { error }` with a 4xx/5xx
 status; 401 means "log in again".
 
 The desktop app serves the same API to its own window, without login: there every
@@ -59,3 +59,20 @@ does); `local` is the address on the home network, `detail` what went wrong.
 | `POST /api/users` | `CreateUser` | `UserView` |
 | `PUT /api/users/{username}` | `UpdateUser` | `UserView` |
 | `DELETE /api/users/{username}` | | 204; refused while they have servers |
+
+## Checking from outside (hosted, `ARCHIPEL_PROBE=on`)
+
+| | | |
+|---|---|---|
+| `POST /api/probe` | `ProbeRequest` | `ProbeResponse`; no login. 404 unless turned on |
+
+A desktop app asks a hosted archipel to check that its ports reach it from the
+internet. The hosted archipel connects to the caller's own address (the
+connection's, or `X-Real-IP` when the connection comes from facade's entry point on
+the same machine) on `port`, over TCP and UDP, sends `archipel-probe <nonce>\n`
+and expects the same line back. `tcp` and `udp` are `reached`, `silent`,
+`refused`, `wrong_answer` (something else answered) or `unsupported` (an IPv6
+caller). With `host`, it also says whether that name's IPv4 addresses include the
+caller's (`HostCheck`). 400 for a private caller or a request out of bounds (port
+1024-65535, nonce of 16 to 64 letters and digits, a hostname), 429 after 10
+requests in 10 minutes from one address, 503 when 16 checks run already.
