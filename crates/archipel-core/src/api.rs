@@ -208,6 +208,107 @@ pub struct Internet {
     /// the ports in it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firewall: Option<String>,
+    /// What a hosted archipel saw when it tried to reach this computer, while the
+    /// state is `internet`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<Verification>,
+}
+
+/// `POST /api/probe` (a hosted archipel): what the caller wants checked on its own
+/// public address, from the internet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeRequest {
+    /// The port archipel's echo responder listens on, TCP and UDP.
+    pub port: u16,
+    /// What the responder echoes back, so nothing else can pass for it: 16 to 64
+    /// letters and digits.
+    pub nonce: String,
+    /// A hostname the caller wants players to use, to check it leads to the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeResponse {
+    /// The address probed: the caller's, as the internet sees it.
+    pub ip: String,
+    pub tcp: ProbeOutcome,
+    pub udp: ProbeOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostCheck>,
+}
+
+/// What came back from one protocol's probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeOutcome {
+    /// archipel's responder echoed the probe.
+    Reached,
+    /// Nothing answered in time.
+    Silent,
+    /// The connection was refused (by the computer, or by a router that forwards
+    /// nothing: never a success).
+    Refused,
+    /// Something other than archipel's responder answered.
+    WrongAnswer,
+    /// Not checked: an IPv6 address.
+    Unsupported,
+}
+
+/// Where a hostname leads, as the internet's DNS says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCheck {
+    pub name: String,
+    /// Its IPv4 addresses; none when it does not exist.
+    pub addresses: Vec<String>,
+    /// The caller's address is among them.
+    pub matches: bool,
+}
+
+/// Whether this computer was reached from the internet (the desktop app, which
+/// asks a hosted archipel to try).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Verification {
+    pub outside: Outside,
+    /// What failed, in a few words: "nothing answered on UDP 30019 from outside".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Where the hostname set for friends leads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostCheck>,
+    /// Why that hostname is not given to friends: "x.ddns.net points to A, but your
+    /// address is B".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_note: Option<String>,
+    pub checked_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outside {
+    /// A probe from the internet got through, TCP and UDP.
+    Reached,
+    /// It did not: the router says the ports are open, but they are not.
+    NotReached,
+    /// It could not be tried: no free port to try on, or an IPv6 address.
+    Unverifiable,
+    /// No one to ask: checking is off, or the hosted archipel did not answer.
+    Unavailable,
+}
+
+/// `GET` and `PUT /api/settings` (the desktop app).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Settings {
+    /// The hosted archipel asked to check from outside; empty: no checking.
+    pub probe_url: String,
+    /// The one archipel asks unless told otherwise (ignored on `PUT`).
+    #[serde(default)]
+    pub default_probe_url: String,
+    /// The hostname friends should use (a dynamic DNS name); empty: none.
+    #[serde(default)]
+    pub public_host: String,
 }
 
 /// Whether a running server can be reached from the internet.
@@ -230,6 +331,9 @@ pub struct Reach {
     /// As [`Internet::firewall`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firewall: Option<String>,
+    /// As [`Internet::verified`]: this computer's latest check from outside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<Verification>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

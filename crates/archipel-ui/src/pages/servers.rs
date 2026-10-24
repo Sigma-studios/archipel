@@ -31,6 +31,7 @@ pub fn reach_of(reach: Option<&Reach>) -> Reach {
         forward: vec![],
         detail: None,
         firewall: None,
+        verified: None,
     })
 }
 
