@@ -840,14 +840,20 @@ fn opens(unit: &std::path::Path, first: u16, last: u16) -> bool {
                 udp |= line.contains("udp");
             }
         }
-        // The files it refers to: /nix/store/<hash>-<name>[/…].
-        for word in text.split(|c: char| c.is_whitespace() || "\"';=()".contains(c)) {
-            if word.starts_with("/nix/store/") && seen.len() + files.len() < 50 {
-                files.push(word.into());
+        for path in store_paths(&text) {
+            if seen.len() + files.len() < 50 {
+                files.push(path.into());
             }
         }
     }
     tcp && udp
+}
+
+/// The files `text` refers to: /nix/store/<hash>-<name>[/…]. A unit's
+/// `ExecStart=@/nix/store/…` names its program after an `@`, as NixOS writes them.
+fn store_paths(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| c.is_whitespace() || "\"';=()@:".contains(c))
+        .filter(|word| word.starts_with("/nix/store/"))
 }
 
 fn gateway() -> Option<Ipv4Addr> {
@@ -948,6 +954,20 @@ mod tests {
         .unwrap();
         assert!(opens(&unit, 30000, 30019), "nftables");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn follows_a_units_programs() {
+        let unit = "Environment=\"PATH=/nix/store/a-iptables/bin:/nix/store/b-coreutils/bin\"\n\
+                    ExecStart=@/nix/store/c-firewall-start/bin/firewall-start firewall-start\n";
+        assert_eq!(
+            store_paths(unit).collect::<Vec<_>>(),
+            [
+                "/nix/store/a-iptables/bin",
+                "/nix/store/b-coreutils/bin",
+                "/nix/store/c-firewall-start/bin/firewall-start",
+            ]
+        );
     }
 
     #[test]
