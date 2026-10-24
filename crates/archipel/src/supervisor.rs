@@ -373,6 +373,11 @@ impl Supervisor {
                 return;
             }
             let message = match result {
+                // What shells say when a program is missing or cannot start.
+                Ok(code) if code == "code 127" => format!(
+                    "it exited on its own ({code}): a program it runs is missing or cannot \
+                     run on this system, as its console says"
+                ),
                 Ok(code) => format!("it exited on its own ({code})"),
                 Err(e) => format!("{e:#}"),
             };
@@ -560,6 +565,7 @@ impl Supervisor {
                         });
                         console.system("ready".into());
                     }
+                    true
                 }
             },
         );
@@ -1043,36 +1049,66 @@ fn spawn(
     let program = PathBuf::from(cmd.as_std().get_program());
     cmd.spawn().map_err(|e| match e.kind() {
         // The file is there, yet "not found": its ELF interpreter is not.
-        std::io::ErrorKind::NotFound if program.is_file() => anyhow!(
-            "{} cannot run on this system: it is built for usual Linux distributions, \
-             and the loader it needs ({}) is missing. On NixOS, turn on programs.nix-ld \
-             (or open archipel with appimage-run)",
-            program.display(),
-            elf_interpreter(&program).unwrap_or_else(|| "/lib64/ld-linux-x86-64.so.2".into())
-        ),
+        std::io::ErrorKind::NotFound if program.is_file() => {
+            anyhow!("{}", loader_missing(&program))
+        }
         _ => e.into(),
     })
 }
 
-/// The dynamic loader an ELF program asks for (its `PT_INTERP`), if it says.
+/// Why `program`, which is there, cannot start: the loader it asks for is not.
+fn loader_missing(program: &Path) -> String {
+    let loader = elf_interpreter(program);
+    let bits32 = loader.as_deref() == Some("/lib/ld-linux.so.2");
+    let fix = if bits32 {
+        "It is a 32-bit program: install your system's 32-bit libraries (lib32gcc-s1 and \
+         lib32stdc++6 on Debian and Ubuntu). NixOS has no 32-bit loader there, even with \
+         programs.nix-ld, so 32-bit games do not run on it"
+    } else {
+        "On NixOS, turn on programs.nix-ld (or open archipel with appimage-run)"
+    };
+    format!(
+        "{} cannot run on this system: it is built for usual Linux distributions, and the \
+         loader it needs ({}) is missing. {fix}",
+        program.display(),
+        loader.unwrap_or_else(|| "/lib64/ld-linux-x86-64.so.2".into()),
+    )
+}
+
+/// The dynamic loader an ELF program asks for (its `PT_INTERP`), if it says:
+/// 64-bit or 32-bit.
 fn elf_interpreter(program: &Path) -> Option<String> {
     let bytes = std::fs::read(program).ok()?;
-    if bytes.get(..4)? != b"\x7fELF" || *bytes.get(4)? != 2 {
-        return None; // not a 64-bit ELF (a script: its interpreter is on the first line)
+    if bytes.get(..4)? != b"\x7fELF" {
+        return None; // a script: its interpreter is on the first line
     }
+    let wide = match *bytes.get(4)? {
+        1 => false,
+        2 => true,
+        _ => return None,
+    };
     let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
     let u64_at = |at: usize| Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?));
-    let (phoff, phentsize, phnum) = (
-        u64_at(0x20)? as usize,
-        u16_at(0x36)? as usize,
-        u16_at(0x38)?,
-    );
+    // Where the program headers are, and where in one its offset and size are.
+    let (phoff, phentsize, phnum, field_off, field_size) = if wide {
+        (u64_at(0x20)? as usize, u16_at(0x36)?, u16_at(0x38)?, 8, 32)
+    } else {
+        (u32_at(0x1c)? as usize, u16_at(0x2a)?, u16_at(0x2c)?, 4, 16)
+    };
+    let word = |at: usize| {
+        if wide {
+            u64_at(at).map(|v| v as usize)
+        } else {
+            u32_at(at).map(|v| v as usize)
+        }
+    };
     (0..phnum as usize).find_map(|i| {
-        let h = phoff + i * phentsize;
-        if u32::from_le_bytes(bytes.get(h..h + 4)?.try_into().ok()?) != 3 {
+        let h = phoff + i * phentsize as usize;
+        if u32_at(h)? != 3 {
             return None;
         }
-        let (off, size) = (u64_at(h + 8)? as usize, u64_at(h + 32)? as usize);
+        let (off, size) = (word(h + field_off)?, word(h + field_size)?);
         let path = bytes.get(off..off + size)?;
         Some(
             String::from_utf8_lossy(path)
@@ -1088,17 +1124,32 @@ fn pipe_output(
     out: Option<tokio::process::ChildStdout>,
     err: Option<tokio::process::ChildStderr>,
     console: Console,
-    watch: impl Fn(&str) + Send + Sync + 'static,
+    // Whether to show the line.
+    watch: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> impl std::future::Future<Output = ()> + Send + 'static {
     let watch = Arc::new(watch);
     let mut tasks = Vec::new();
+    fn show(console: &Console, line: String) {
+        // A shell could not start a program, though it is there: say why.
+        let hint = line
+            .split_once(": cannot execute: required file not found")
+            .map(|(before, _)| before.rsplit(": ").next().unwrap_or(before).to_string())
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .map(|p| loader_missing(&p));
+        console.line(line);
+        if let Some(hint) = hint {
+            console.system(hint);
+        }
+    }
     if let Some(out) = out {
         let (console, watch) = (console.clone(), watch.clone());
         tasks.push(tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                watch(&line);
-                console.line(line);
+                if watch(&line) {
+                    show(&console, line);
+                }
             }
         }));
     }
@@ -1106,8 +1157,9 @@ fn pipe_output(
         tasks.push(tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                watch(&line);
-                console.line(line);
+                if watch(&line) {
+                    show(&console, line);
+                }
             }
         }));
     }
@@ -1125,12 +1177,22 @@ pub async fn run_logged(
     run_as: &RunAs,
     console: &Console,
 ) -> anyhow::Result<()> {
+    run_logged_with(cmd, run_as, console, |_| true).await
+}
+
+/// [`run_logged`], showing only the lines `show` keeps.
+pub async fn run_logged_with(
+    cmd: tokio::process::Command,
+    run_as: &RunAs,
+    console: &Console,
+    show: impl Fn(&str) -> bool + Send + Sync + 'static,
+) -> anyhow::Result<()> {
     let mut child = spawn(cmd, run_as)?;
     let readers = pipe_output(
         child.stdout.take(),
         child.stderr.take(),
         console.clone(),
-        |_| {},
+        show,
     );
     let status = child.wait().await?;
     readers.await;
@@ -1225,5 +1287,28 @@ mod tests {
             "{loader}"
         );
         assert_eq!(elf_interpreter(Path::new("/etc/hostname")), None);
+    }
+
+    #[test]
+    fn reads_a_32_bit_programs_loader() {
+        // An ELF32 header, one PT_INTERP program header, then the loader's path.
+        let interp = b"/lib/ld-linux.so.2\0";
+        let mut elf = vec![0u8; 84];
+        elf[..6].copy_from_slice(b"\x7fELF\x01\x01");
+        elf[0x1c..0x20].copy_from_slice(&52u32.to_le_bytes());
+        elf[0x2a..0x2c].copy_from_slice(&32u16.to_le_bytes());
+        elf[0x2c..0x2e].copy_from_slice(&1u16.to_le_bytes());
+        elf[52..56].copy_from_slice(&3u32.to_le_bytes());
+        elf[56..60].copy_from_slice(&84u32.to_le_bytes());
+        elf[68..72].copy_from_slice(&(interp.len() as u32).to_le_bytes());
+        elf.extend_from_slice(interp);
+        let path = std::env::temp_dir().join(format!("archipel-elf32-{}", std::process::id()));
+        std::fs::write(&path, elf).unwrap();
+        assert_eq!(
+            elf_interpreter(&path).as_deref(),
+            Some("/lib/ld-linux.so.2")
+        );
+        assert!(loader_missing(&path).contains("32-bit"));
+        let _ = std::fs::remove_file(path);
     }
 }

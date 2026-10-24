@@ -2,7 +2,7 @@
 # server from Steam (32-bit only).
 id = "fof"
 name = "Fistful of Frags"
-description = "A free western shooter on the Source engine: duels, teamplay and break bad. The dedicated server comes from Steam."
+description = "A free western shooter on the Source engine: duels, teamplay and break bad. The dedicated server comes from Steam (about 3 GB; it is 32-bit, so not on NixOS)."
 badge = "🤠"
 memory = { min_mb = 512, default_mb = 1024 }
 ports = [

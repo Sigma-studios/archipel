@@ -2,7 +2,7 @@
 # Steam (64-bit).
 id = "tf2"
 name = "Team Fortress 2"
-description = "Valve's class-based team shooter. The dedicated server comes from Steam: a big download (about 12 GB)."
+description = "Valve's class-based team shooter. The dedicated server comes from Steam: a big download (about 15 GB)."
 badge = "🔧"
 memory = { min_mb = 1024, default_mb = 1536 }
 ports = [

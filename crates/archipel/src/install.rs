@@ -3,8 +3,8 @@
 //! * `minecraft`: the server jar (vanilla from Mojang, or Paper) in the server's
 //!   directory, and the Java it needs from Adoptium, shared by every server.
 //! * `shared`: an archive downloaded once per game and shared, read-only.
-//! * `steamcmd`: SteamCMD in the server's directory, run as the server's user,
-//!   installing the game there.
+//! * `steamcmd`: a Steam app in the server's directory, downloaded anonymously by
+//!   DepotDownloader (shared) run as the server's user.
 //!
 //! Anything written into a server's directory is written as its user (see
 //! [`fsops`]); what is shared belongs to root and is only readable by servers.
@@ -28,7 +28,14 @@ use crate::fsops;
 
 const MOJANG_MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const PAPER: &str = "https://fill.papermc.io/v3/projects/paper";
-const STEAMCMD: &str = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz";
+/// Downloads Steam apps (SteamRE/DepotDownloader), pinned with its archives' SHA-256.
+const DEPOT_DOWNLOADER_VERSION: &str = "3.4.0";
+const DEPOT_DOWNLOADER_X64_SHA256: &str =
+    "a999dec66b4850fc961bd50366696d23c2d0fad7b18790e6a5647b2f19097a53";
+const DEPOT_DOWNLOADER_ARM64_SHA256: &str =
+    "d9fb612ccebc1db8eeea3b4045d2221ec70431381393ce908fb72f01d4f9c812";
+/// Steamworks' redistributable files, Steam's client library among them.
+const STEAMWORKS_REDIST: u32 = 1007;
 
 /// What a server's files were installed from, stored with it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,6 +411,93 @@ impl Installer {
 
     // ---------------------------------------------------------------- Steam
 
+    /// DepotDownloader, downloaded once and shared: the path of its program.
+    async fn depot_downloader(&self, console: &Console) -> anyhow::Result<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = self
+            .cfg
+            .runtimes_dir()
+            .join(format!("depotdownloader-{DEPOT_DOWNLOADER_VERSION}"));
+        let program = dir.join("DepotDownloader");
+        if dir.join(".complete").exists() {
+            return Ok(program);
+        }
+        let lock = self.lock(&dir);
+        let _held = lock.lock().await;
+        if dir.join(".complete").exists() {
+            return Ok(program);
+        }
+        let (arch, sha256) = match std::env::consts::ARCH {
+            "x86_64" => ("x64", DEPOT_DOWNLOADER_X64_SHA256),
+            "aarch64" => ("arm64", DEPOT_DOWNLOADER_ARM64_SHA256),
+            other => bail!("no DepotDownloader for {other}"),
+        };
+        let url = format!(
+            "https://github.com/SteamRE/DepotDownloader/releases/download/\
+             DepotDownloader_{DEPOT_DOWNLOADER_VERSION}/DepotDownloader-linux-{arch}.zip"
+        );
+        console.system("downloading DepotDownloader, which gets games from Steam".into());
+        let tmp = self.tmp_file("depotdownloader.zip")?;
+        self.download(&url, &tmp, Some(Check::Sha256(sha256.into())), console)
+            .await?;
+        let staging = dir.with_extension("partial");
+        let _ = std::fs::remove_dir_all(&staging);
+        let (from, to) = (tmp.clone(), staging.clone());
+        tokio::task::spawn_blocking(move || unzip(&from, &to)).await??;
+        let _ = std::fs::remove_file(&tmp);
+        // Servers' users run it.
+        std::fs::set_permissions(
+            staging.join("DepotDownloader"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(self.cfg.runtimes_dir())?;
+        std::fs::rename(&staging, &dir)?;
+        std::fs::write(dir.join(".complete"), "")?;
+        Ok(program)
+    }
+
+    /// Steam app `app_id` (its `beta` branch) in `dir`, downloaded anonymously with
+    /// DepotDownloader as the server's user: a 64-bit program, unlike SteamCMD,
+    /// which needs 32-bit libraries some systems lack (NixOS).
+    async fn steam_app(
+        &self,
+        app_id: u32,
+        beta: Option<&str>,
+        dir: &Path,
+        run_as: &RunAs,
+        console: &Console,
+    ) -> anyhow::Result<()> {
+        let program = self.depot_downloader(console).await?;
+        let mut last = Err(anyhow!("DepotDownloader did not run"));
+        // Steam's servers time out now and then: again, keeping what came.
+        for attempt in 1..=3 {
+            let mut cmd = tokio::process::Command::new(&program);
+            cmd.args(["-app", &app_id.to_string()]);
+            if let Some(beta) = beta {
+                cmd.args(["-beta", beta]);
+            }
+            cmd.args(["-os", "linux", "-osarch", "64", "-validate", "-dir"])
+                .arg(dir)
+                .current_dir(dir)
+                .env_clear()
+                .env("HOME", dir)
+                .env("PATH", crate::fsops::servers_path())
+                .env("LANG", "C.UTF-8")
+                // No ICU needed: it handles no text in other languages.
+                .env("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1");
+            last =
+                crate::supervisor::run_logged_with(cmd, run_as, console, progress(console)).await;
+            match &last {
+                Ok(()) => break,
+                Err(e) => {
+                    console.system(format!("DepotDownloader failed (attempt {attempt}): {e:#}"))
+                }
+            }
+        }
+        last
+    }
+
     async fn steam(
         &self,
         app_id: u32,
@@ -412,73 +506,44 @@ impl Installer {
         run_as: &RunAs,
         console: &Console,
     ) -> anyhow::Result<()> {
-        // SteamCMD's bootstrap, downloaded once; it unpacks and updates itself in the
-        // server's directory, as the server's user.
-        let bootstrap = self.cfg.runtimes_dir().join("steamcmd_linux.tar.gz");
+        console.system(match beta {
+            Some(beta) => format!("installing Steam app {app_id} ({beta})"),
+            None => format!("installing Steam app {app_id}"),
+        });
+        self.steam_app(app_id, beta, dir, run_as, console).await?;
+        // Steam games look for Steam's client library in their user's home: 64-bit
+        // ones in sdk64, 32-bit ones (older Source games) in sdk32. It comes with
+        // Steamworks' redistributable files.
+        console.system("getting Steam's client library".into());
+        let redist = fsops::inside(dir, ".steam/redist")?;
         {
-            let lock = self.lock(&bootstrap);
-            let _held = lock.lock().await;
-            if !bootstrap.exists() {
-                console.system("downloading SteamCMD".into());
-                let tmp = self.tmp_file("steamcmd_linux.tar.gz")?;
-                self.download(STEAMCMD, &tmp, None, console).await?;
-                std::fs::create_dir_all(self.cfg.runtimes_dir())?;
-                std::fs::rename(&tmp, &bootstrap)?;
-            }
+            let redist = redist.clone();
+            fsops::as_user(run_as.uid, move || std::fs::create_dir_all(redist)).await?;
         }
-        let steamcmd = fsops::inside(dir, ".steamcmd")?;
-        let (from, to) = (bootstrap.clone(), steamcmd.clone());
+        self.steam_app(STEAMWORKS_REDIST, None, &redist, run_as, console)
+            .await
+            .context("getting Steam's client library")?;
+        let root = dir.to_path_buf();
         fsops::as_user(run_as.uid, move || {
-            if !to.join("steamcmd.sh").exists() {
-                untar_gz(&from, &to, 0).map_err(std::io::Error::other)?;
+            for (from, to) in [
+                ("linux64/steamclient.so", "sdk64"),
+                ("steamclient.so", "sdk32"),
+            ] {
+                let client = redist.join(from);
+                if client.exists() {
+                    let dest = root.join(".steam").join(to);
+                    std::fs::create_dir_all(&dest)?;
+                    std::fs::rename(&client, dest.join("steamclient.so"))?;
+                }
             }
-            Ok(())
+            let _ = std::fs::remove_dir_all(&redist);
+            // What SteamCMD left there before archipel used DepotDownloader.
+            let _ = std::fs::remove_dir_all(root.join(".steamcmd"));
+            // Steam's file lists do not always mark programs executable.
+            make_programs_executable(&root)
         })
         .await
-        .context("unpacking SteamCMD")?;
-
-        console.system(match beta {
-            Some(beta) => format!("installing Steam app {app_id} ({beta}) with SteamCMD"),
-            None => format!("installing Steam app {app_id} with SteamCMD"),
-        });
-        let mut last = Err(anyhow!("SteamCMD did not run"));
-        // Its first run updates itself and sometimes exits with an error: again.
-        for attempt in 1..=3 {
-            let mut cmd = tokio::process::Command::new(steamcmd.join("steamcmd.sh"));
-            cmd.arg("+force_install_dir")
-                .arg(dir)
-                .args(["+login", "anonymous", "+app_update"])
-                .arg(app_id.to_string());
-            if let Some(beta) = beta {
-                cmd.args(["-beta", beta]);
-            }
-            cmd.args(["validate", "+quit"])
-                .current_dir(&steamcmd)
-                .env_clear()
-                .env("HOME", dir)
-                .env("PATH", crate::fsops::servers_path())
-                .env("LANG", "C.UTF-8");
-            last = crate::supervisor::run_logged(cmd, run_as, console).await;
-            match &last {
-                Ok(()) => break,
-                Err(e) => console.system(format!("SteamCMD failed (attempt {attempt}): {e:#}")),
-            }
-        }
-        last?;
-        // Steam games look for Steam's client library in their user's home: 64-bit
-        // ones in sdk64, 32-bit ones (older Source games) in sdk32.
-        for (from, to) in [("linux64", "sdk64"), ("linux32", "sdk32")] {
-            let client = steamcmd.join(from).join("steamclient.so");
-            let dest = fsops::inside(dir, &format!(".steam/{to}/steamclient.so"))?;
-            fsops::as_user(run_as.uid, move || {
-                if client.exists() {
-                    std::fs::create_dir_all(dest.parent().unwrap_or(&dest))?;
-                    std::fs::copy(&client, &dest)?;
-                }
-                Ok(())
-            })
-            .await?;
-        }
+        .context("finishing the install")?;
         console.system(format!("Steam app {app_id} installed"));
         Ok(())
     }
@@ -580,6 +645,70 @@ pub(crate) async fn copy_as_user(from: &Path, to: PathBuf, uid: u32) -> anyhow::
     })
     .await
     .context("copying into the server's directory")
+}
+
+/// DepotDownloader prints lines per file, ` 12.34% path`: those become a line
+/// every tenth of the way. Its other lines are shown, but those about each file
+/// it prepares, and the chunks it fetches again after a timeout.
+fn progress(console: &Console) -> impl Fn(&str) -> bool + Send + Sync + 'static {
+    let console = console.clone();
+    let told = std::sync::atomic::AtomicU32::new(0);
+    move |line: &str| {
+        if line.starts_with("Pre-allocating ")
+            || line.starts_with("Connection timeout downloading chunk")
+        {
+            return false;
+        }
+        let Some(percent) = line
+            .trim_start()
+            .split_once('%')
+            .and_then(|(p, _)| p.parse::<f32>().ok())
+        else {
+            return true;
+        };
+        let tenth = (percent / 10.0) as u32;
+        if tenth > told.load(std::sync::atomic::Ordering::Relaxed) {
+            told.store(tenth, std::sync::atomic::Ordering::Relaxed);
+            console.system(format!("  {}%", tenth * 10));
+        }
+        false
+    }
+}
+
+/// Marks executable the programs and scripts under `root` (ELF files, `#!`
+/// scripts) that are not. Links are not followed.
+fn make_programs_executable(root: &Path) -> std::io::Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            let mode = meta.permissions().mode();
+            if mode & 0o100 != 0 {
+                continue;
+            }
+            let mut head = [0u8; 4];
+            let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut head)) else {
+                continue;
+            };
+            if head[..n] == *b"\x7fELF" || head[..n.min(2)] == *b"#!" {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o111))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A relative archive path, without its first `strip` components, if it stays
@@ -753,6 +882,45 @@ struct PaperChecksums {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn condenses_depot_downloader_progress() {
+        let log =
+            std::env::temp_dir().join(format!("archipel-progress-{}.log", std::process::id()));
+        let console = Console::new(log.clone());
+        let keep = progress(&console);
+        assert!(keep("Got depot key for 1006 result: OK"));
+        assert!(!keep("Pre-allocating /data/servers/1/srcds_run"));
+        assert!(!keep("Connection timeout downloading chunk 1535d966"));
+        assert!(!keep(" 3.10% srcds_run"));
+        assert!(!keep(" 12.00% bin/linux64/srcds"));
+        assert!(!keep(" 15.00% garrysmod/cfg/mount.cfg"));
+        assert!(!keep("100.00% steamclient.so"));
+        assert_eq!(
+            console.follow(10).0,
+            ["[archipel]   10%", "[archipel]   100%"]
+        );
+        let _ = std::fs::remove_file(log);
+    }
+
+    #[test]
+    fn marks_programs_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("archipel-exec-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("srcds_run"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("bin/srcds"), b"\x7fELF\x02rest").unwrap();
+        std::fs::write(dir.join("readme.txt"), "hello").unwrap();
+        for f in ["srcds_run", "bin/srcds", "readme.txt"] {
+            std::fs::set_permissions(dir.join(f), std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        make_programs_executable(&dir).unwrap();
+        let mode = |f: &str| std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("srcds_run"), 0o755);
+        assert_eq!(mode("bin/srcds"), 0o755);
+        assert_eq!(mode("readme.txt"), 0o644);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn cleans_archive_paths() {
