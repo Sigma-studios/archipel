@@ -139,6 +139,11 @@ pub async fn upload(path: &str, file: web_sys::File) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// DELETE, decoding the answer.
+pub async fn delete_json<T: DeserializeOwned>(path: &str) -> Result<T, String> {
+    decode(call(Method::DELETE, path, None, None).await?).await
+}
+
 pub async fn delete(path: &str) -> Result<(), String> {
     call(Method::DELETE, path, None, None).await.map(|_| ())
 }

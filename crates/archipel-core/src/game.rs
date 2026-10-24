@@ -50,6 +50,10 @@ pub struct GameDef {
     /// What can be typed into its console, offered as one types.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<CommandDef>,
+    /// Steam Workshop items the server downloads at start: its gamemode's and
+    /// its owner's (Garry's Mod).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workshop: Option<WorkshopDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,14 +180,22 @@ pub enum SettingKind {
         options: Vec<ChoiceOption>,
         /// More options archipel lists itself, after these: `minecraft_versions`
         /// (releases, newest first, those Paper builds when `flavor` is `paper`),
-        /// `maps` (the maps among the server's addons).
+        /// `maps` (the maps among the server's addons), `workshop_maps` (the
+        /// gamemode's maps, instead of these when it has some, and those of the
+        /// server's Workshop items), `workshop_gamemodes` (the gamemodes among
+        /// its Workshop items).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options_from: Option<String>,
     },
 }
 
 /// The option sources archipel knows, for `options_from`.
-pub const OPTION_SOURCES: &[&str] = &["minecraft_versions", "maps"];
+pub const OPTION_SOURCES: &[&str] = &[
+    "minecraft_versions",
+    "maps",
+    "workshop_maps",
+    "workshop_gamemodes",
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChoiceOption {
@@ -370,6 +382,89 @@ impl AddonsDef {
     }
 }
 
+/// How a game takes Steam Workshop items (Garry's Mod): archipel writes the list
+/// the server downloads at start, from the chosen gamemode's preset and the
+/// items its owner adds, and has players download the content they need.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopDef {
+    /// The Steam app the items belong to: 4000 for Garry's Mod.
+    pub app_id: u32,
+    /// The list of items the server reads at start (Valve's KeyValues).
+    pub ids_file: String,
+    /// Where the server keeps what it downloaded (`.gma` archives), read for the
+    /// maps and gamemodes they hold.
+    pub cache_dirs: Vec<String>,
+    /// A Lua file having players download the items with content (models,
+    /// materials, sounds); maps and gamemodes they get anyway.
+    pub lua_file: String,
+    /// The setting choosing the gamemode, whose value picks a preset.
+    pub gamemode_setting: String,
+    /// The setting choosing the first map, set to the preset's first map when
+    /// it is not one the gamemode can play.
+    pub map_setting: String,
+    #[serde(default)]
+    pub presets: Vec<WorkshopPreset>,
+}
+
+/// What a gamemode brings: its items, its maps, its settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopPreset {
+    /// The gamemode setting's value: `terrortown`.
+    pub gamemode: String,
+    /// Workshop items besides its maps: the gamemode, a map vote.
+    #[serde(default)]
+    pub items: Vec<String>,
+    #[serde(default)]
+    pub maps: Vec<WorkshopMap>,
+    /// Map names it plays, by prefix: `ttt_`. Empty: any map.
+    #[serde(default)]
+    pub map_prefixes: Vec<String>,
+    /// Console settings for it, run at each map: `{workshop.config}`.
+    #[serde(default)]
+    pub config: String,
+    /// A file it reads the maps to play in turn from, one per line, written at
+    /// each start: its own, then downloaded ones it plays (Murder's
+    /// `garrysmod/data/murder/maplist.txt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_list_file: Option<String>,
+}
+
+/// A map from the Workshop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkshopMap {
+    /// Its Workshop item.
+    pub id: String,
+    /// Its name in the game: `ttt_minecraft_b5`.
+    pub map: String,
+    pub label: String,
+    /// Its download, in MB, for players.
+    #[serde(default)]
+    pub mb: u32,
+}
+
+impl WorkshopDef {
+    pub fn preset(&self, gamemode: &str) -> Option<&WorkshopPreset> {
+        self.presets.iter().find(|p| p.gamemode == gamemode)
+    }
+}
+
+impl WorkshopPreset {
+    /// Whether a map is one this gamemode plays.
+    pub fn plays(&self, map: &str) -> bool {
+        self.maps.iter().any(|m| m.map == map)
+            || self.map_prefixes.is_empty()
+            || self
+                .map_prefixes
+                .iter()
+                .any(|p| map.to_lowercase().starts_with(p))
+    }
+}
+
+/// Whether `id` looks like a Workshop item's: digits.
+pub fn is_workshop_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 20 && id.chars().all(|c| c.is_ascii_digit())
+}
+
 /// A console command, as the console offers it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandDef {
@@ -385,6 +480,20 @@ pub struct CommandDef {
 impl GameDef {
     pub fn setting(&self, key: &str) -> Option<&SettingDef> {
         self.settings.iter().find(|s| s.key == key)
+    }
+
+    /// A server's stored settings, as the game takes them now: those it no longer
+    /// has are dropped (a newer definition), the missing ones get their default.
+    pub fn stored_settings(
+        &self,
+        stored: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        let known = stored
+            .iter()
+            .filter(|(k, _)| self.setting(k).is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.settings_from(&known)
     }
 
     /// The settings `given`, checked, with defaults for the ones left out.
@@ -424,6 +533,9 @@ impl GameDef {
             ("java", Value::Text("/data/runtimes/java/bin/java".into())),
         ] {
             ctx.insert(key.into(), value);
+        }
+        if self.workshop.is_some() {
+            ctx.insert("workshop.config".into(), Value::Text(String::new()));
         }
         ctx
     }
@@ -572,6 +684,50 @@ impl GameDef {
         ) && self.addons.is_none()
         {
             return Err(at("options_from `maps` needs [addons]".into()));
+        }
+        if let Some(w) = &self.workshop {
+            for path in [&w.ids_file, &w.lua_file].into_iter().chain(&w.cache_dirs) {
+                let p = std::path::Path::new(path);
+                if path.is_empty()
+                    || p.components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return Err(at(format!(
+                        "workshop: `{path}` must be a plain relative path"
+                    )));
+                }
+            }
+            for key in [&w.gamemode_setting, &w.map_setting] {
+                if self.setting(key).is_none() {
+                    return Err(at(format!("workshop: no setting `{key}`")));
+                }
+            }
+            for p in &w.presets {
+                if let Some(path) = &p.map_list_file
+                    && std::path::Path::new(path)
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return Err(at(format!(
+                        "workshop preset {}: `{path}` must be a plain relative path",
+                        p.gamemode
+                    )));
+                }
+                let ids = p.items.iter().chain(p.maps.iter().map(|m| &m.id));
+                if let Some(bad) = ids.into_iter().find(|i| !is_workshop_id(i)) {
+                    return Err(at(format!(
+                        "workshop preset {}: `{bad}` is not a Workshop item",
+                        p.gamemode
+                    )));
+                }
+            }
+        }
+        if self.settings.iter().any(|s| {
+            matches!(&s.kind, SettingKind::Choice { options_from: Some(f), .. }
+                if f.starts_with("workshop_"))
+        }) && self.workshop.is_none()
+        {
+            return Err(at("options_from `workshop_…` needs [workshop]".into()));
         }
         if let Some(c) = self.commands.iter().find(|c| c.name.trim().is_empty()) {
             return Err(at(format!("a command has no name (help: {})", c.help)));

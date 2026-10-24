@@ -31,8 +31,16 @@ Servers take files of their own in a tab named after them: **Plugins** for Paper
 (uploaded, or found on [Modrinth](https://modrinth.com/plugins) for the server's
 Minecraft version and installed with the plugins they require), **Maps** for Urban
 Terror (`.pk3`), Team Fortress 2 and Fistful of Frags (`.bsp`), **Addons** for
-Garry's Mod (`.gma`; a Workshop collection, set in its settings, is easier). Maps
-added there are offered as the server's first map. The console offers the game's
+Garry's Mod (`.gma`). Maps added there are offered as the server's first map.
+
+Garry's Mod plays Sandbox, **Trouble in Terrorist Town**, **Murder** or **Prop Hunt**
+out of the box: picking one brings what it needs from the Steam Workshop (the
+gamemode, a map vote for TTT, and maps that need no Counter-Strike: Source), lists
+its maps as the first map, and sets it up to change maps in turn. Its **Workshop**
+tab shows that, and takes items or whole collections pasted by link: the server
+downloads them at start (no Steam account needed), the maps and gamemodes found in
+them join the settings' lists, and players get the map being played, the gamemode
+and the models and sounds of the rest. The console offers the game's
 commands as one types (Tab completes them), and lists them all on Tab with nothing
 typed or from its Commands button; none take a slash, and a slash typed out of habit
 before a known command is dropped.
@@ -197,7 +205,8 @@ set = { port = "{port.game}", name = "{setting.name}" }
 A `choice` can also list options archipel fetches itself, after its own: with
 `options_from = "minecraft_versions"`, Minecraft's releases, newest first (those
 Paper builds when the `flavor` setting is `paper`); with `options_from = "maps"`,
-the maps among the server's addons.
+the maps among the server's addons; `workshop_maps` and `workshop_gamemodes` with
+a `[workshop]` (below).
 
 A game may take files of its owner's (`[addons]`), shown in a tab of their own,
 and list its console commands (`[[commands]]`), offered as one types:
@@ -216,6 +225,11 @@ name = "kick"
 args = "<player>"
 help = "Throw a player out"
 ```
+
+Garry's Mod's Steam Workshop items come from a `[workshop]` section: where the
+server reads the list of items to download at start and caches them, and
+presets, one per gamemode, with their items, maps and console settings (see
+[`games/gmod.toml`](games/gmod.toml)).
 
 Installs are `minecraft`, `shared` (an archive downloaded once, read-only for every
 server: `{base}`) or `steamcmd` (a Steam app: `app_id`, and `beta` for a branch of

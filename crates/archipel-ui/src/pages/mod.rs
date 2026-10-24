@@ -6,3 +6,4 @@ pub mod server;
 pub mod servers;
 pub mod settings;
 pub mod settings_form;
+pub mod workshop;

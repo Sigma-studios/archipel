@@ -42,7 +42,10 @@ request is its one user's, and there is no `POST /api/login`.
 | `DELETE /api/servers/{id}/addons/files/{name}` | | 204 |
 | `GET /api/servers/{id}/addons/search?q=<text>` | | `Vec<AddonResult>`: from the game's catalogue (`search = "modrinth"`: Paper plugins for its Minecraft version); the most downloaded without `q` |
 | `POST /api/servers/{id}/addons/install` | `InstallAddon` | `InstalledAddons`; downloads the project's newest release for that version, and what it requires that is not there yet. Installing one again replaces its file |
-| `GET /api/games/{game}/options/{key}?<setting>=<value>&_server=<id>` | | `Vec<ChoiceOption>`: a `choice` setting's options, with those archipel lists (`options_from`); `_server` for the maps among that server's addons |
+| `GET /api/games/{game}/options/{key}?<setting>=<value>&_server=<id>` | | `Vec<ChoiceOption>`: a `choice` setting's options, with those archipel lists (`options_from`); `_server` for the maps among that server's addons, or in its Workshop items (`workshop_maps`, after the gamemode's own; `workshop_gamemodes`) |
+| `GET /api/servers/{id}/workshop` | | `WorkshopView`: what its gamemode brings from the Steam Workshop (`preset`), and the items and collections its owner added, as Steam describes them, with the maps and gamemodes the server found in them |
+| `POST /api/servers/{id}/workshop` | `AddWorkshopItem` | `WorkshopView`; `link` is an item's or collection's page address, or its number. 400 for one of another game, private or taken down |
+| `DELETE /api/servers/{id}/workshop/{item}` | | `WorkshopView` |
 
 `ServerView.connect` may contain `{host}`: replace it with the address the page is
 browsed at (`window.location.hostname`). Settings are `Value`s: a JSON string,

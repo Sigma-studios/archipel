@@ -19,6 +19,7 @@ pub mod sandbox;
 pub mod store;
 pub mod supervisor;
 pub mod ui;
+pub mod workshop;
 
 use std::sync::Arc;
 

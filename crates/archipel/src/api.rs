@@ -64,6 +64,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/servers/{id}/console", get(console).post(command))
         .route("/api/servers/{id}/console/lines", get(console_lines))
         .route("/api/servers/{id}/files", get(list_files).put(save_file))
+        .route(
+            "/api/servers/{id}/workshop",
+            get(get_workshop).post(add_workshop_item),
+        )
+        .route(
+            "/api/servers/{id}/workshop/{item}",
+            axum::routing::delete(remove_workshop_item),
+        )
         .route("/api/servers/{id}/addons", get(list_addons))
         .route("/api/servers/{id}/addons/search", get(search_addons))
         .route("/api/servers/{id}/addons/install", post(install_addon))
@@ -484,6 +492,73 @@ async fn setting_options(
             }
             None => vec![],
         },
+        "workshop_maps" | "workshop_gamemodes" => {
+            let def = app
+                .games
+                .get(&game)
+                .and_then(|g| g.workshop.as_ref())
+                .ok_or_else(|| not_found("this game has no Workshop"))?;
+            // What the server downloaded, when it is given.
+            let downloaded = match chosen.get("_server").and_then(|s| s.parse::<u64>().ok()) {
+                Some(id) => {
+                    let row = load(&app, &caller, id)?;
+                    let dir = app.cfg.server_dir(id);
+                    if row.game == game && dir.exists() {
+                        crate::workshop::downloaded(def, &dir, fsops::uid_of(id)).await
+                    } else {
+                        Default::default()
+                    }
+                }
+                None => Default::default(),
+            };
+            if from == "workshop_gamemodes" {
+                let mut found: Vec<String> = downloaded
+                    .values()
+                    .flat_map(|c| c.gamemodes.iter().cloned())
+                    .filter(|g| !options.iter().any(|o| o.value == *g))
+                    .collect();
+                found.sort();
+                found.dedup();
+                found
+            } else {
+                // A gamemode with maps of its own lists those instead of the game's,
+                // then the downloaded ones it plays.
+                let gamemode = chosen
+                    .get(&def.gamemode_setting)
+                    .cloned()
+                    .unwrap_or_default();
+                let preset = def.preset(&gamemode).filter(|p| !p.maps.is_empty());
+                let mut out: Vec<ChoiceOption> = match preset {
+                    Some(p) => p
+                        .maps
+                        .iter()
+                        .map(|m| ChoiceOption {
+                            value: m.map.clone(),
+                            label: format!("{} ({})", m.label, m.map),
+                        })
+                        .collect(),
+                    None => options.clone(),
+                };
+                let mut found: Vec<String> = downloaded
+                    .values()
+                    .flat_map(|c| c.maps.iter().cloned())
+                    .filter(|m| def.preset(&gamemode).is_none_or(|p| p.plays(m)))
+                    .collect();
+                found.sort();
+                found.dedup();
+                out.extend(
+                    found
+                        .into_iter()
+                        .filter(|m| !out.iter().any(|o| o.value == *m))
+                        .map(|m| ChoiceOption {
+                            label: m.clone(),
+                            value: m,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                return Ok(Json(out));
+            }
+        }
         other => return Err(not_found(format!("no option source {other}"))),
     };
     let newest = listed.first().cloned();
@@ -531,7 +606,7 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
     let connect_at = |host: String| {
         let g = game?;
         let template = g.connect.as_ref()?;
-        let settings = g.settings_from(&row.settings).unwrap_or_default();
+        let settings = g.stored_settings(&row.settings).unwrap_or_default();
         let dir = app.cfg.server_dir(row.id);
         let mut ctx = crate::supervisor::context(g, row, &settings, &dir, None, None);
         ctx.insert("host".into(), Value::Text(host));
@@ -755,7 +830,13 @@ async fn update_server(
         row.memory_mb = mb;
     }
     if let Some(given) = &req.settings {
-        let mut merged = row.settings.clone();
+        // Stored ones the game no longer has go; given unknown ones are refused.
+        let mut merged: std::collections::BTreeMap<String, Value> = row
+            .settings
+            .iter()
+            .filter(|(k, _)| game.setting(k).is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         merged.extend(given.clone());
         let settings = game.settings_from(&merged).map_err(bad)?;
         // A different version of the game: its files are installed again.
@@ -999,7 +1080,7 @@ fn with_addons(
         .clone()
         .ok_or_else(|| not_found(format!("{} takes no addons", game.name)))?;
     let settings = game
-        .settings_from(&row.settings)
+        .stored_settings(&row.settings)
         .unwrap_or_else(|_| row.settings.clone());
     Ok((row, addons, settings))
 }
@@ -1176,6 +1257,196 @@ async fn delete_addon(
         .await
         .map_err(|e| not_found(format!("{e:#}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------- Workshop
+
+/// The server, its game's Workshop and its settings.
+fn with_workshop(
+    app: &App,
+    caller: &Caller,
+    id: u64,
+) -> ApiResult<(
+    ServerRow,
+    GameDef,
+    archipel_core::game::WorkshopDef,
+    std::collections::BTreeMap<String, Value>,
+)> {
+    let row = load(app, caller, id)?;
+    let game = app
+        .games
+        .get(&row.game)
+        .ok_or_else(|| not_found("archipel no longer knows this server's game"))?
+        .clone();
+    let def = game
+        .workshop
+        .clone()
+        .ok_or_else(|| not_found(format!("{} has no Workshop", game.name)))?;
+    let settings = game
+        .stored_settings(&row.settings)
+        .unwrap_or_else(|_| row.settings.clone());
+    Ok((row, game, def, settings))
+}
+
+async fn workshop_view(
+    app: &App,
+    id: u64,
+    game: &GameDef,
+    def: &archipel_core::game::WorkshopDef,
+    settings: &std::collections::BTreeMap<String, Value>,
+) -> WorkshopView {
+    let dir = app.cfg.server_dir(id);
+    let uid = fsops::uid_of(id);
+    let state = crate::workshop::read_state(&dir, uid).await;
+    let downloaded = if dir.exists() {
+        crate::workshop::downloaded(def, &dir, uid).await
+    } else {
+        Default::default()
+    };
+    let installer = app.supervisor.installer();
+    let steam = installer.workshop();
+    let gamemode = settings
+        .get(&def.gamemode_setting)
+        .map(Value::as_text)
+        .unwrap_or_default();
+    let preset = def.preset(&gamemode);
+    let mut asked: Vec<String> = state.items.clone();
+    if let Some(p) = preset {
+        asked.extend(p.items.iter().cloned());
+    }
+    let (known, steam_error) = match steam.items(installer.http(), def.app_id, &asked).await {
+        Ok(items) => (items, None),
+        Err(e) => (vec![], Some(format!("{e:#}"))),
+    };
+    let describe = |id: &String| {
+        let mut item = known
+            .iter()
+            .find(|i| &i.id == id)
+            .cloned()
+            .unwrap_or_else(|| WorkshopItem {
+                id: id.clone(),
+                title: id.clone(),
+                kind: WorkshopKind::Addon,
+                bytes: 0,
+                url: format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}"),
+                preview_url: None,
+                children: vec![],
+                problem: None,
+                maps: vec![],
+                gamemodes: vec![],
+                tags: vec![],
+            });
+        // What the server found in it, or in a collection's items.
+        let mut maps = std::collections::BTreeSet::new();
+        let mut gamemodes = std::collections::BTreeSet::new();
+        for part in std::iter::once(id).chain(item.children.iter()) {
+            if let Some(c) = downloaded.get(part) {
+                maps.extend(c.maps.iter().cloned());
+                gamemodes.extend(c.gamemodes.iter().cloned());
+            }
+        }
+        item.maps = maps.into_iter().collect();
+        item.gamemodes = gamemodes.into_iter().collect();
+        item
+    };
+    let preset = preset.map(|p| {
+        let label = game
+            .setting(&def.gamemode_setting)
+            .and_then(|s| match &s.kind {
+                archipel_core::game::SettingKind::Choice { options, .. } => options
+                    .iter()
+                    .find(|o| o.value == p.gamemode)
+                    .map(|o| o.label.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| p.gamemode.clone());
+        WorkshopPresetView {
+            gamemode: label,
+            items: p.items.iter().map(&describe).collect(),
+            maps: p
+                .maps
+                .iter()
+                .map(|m| WorkshopPresetMap {
+                    id: m.id.clone(),
+                    map: m.map.clone(),
+                    label: m.label.clone(),
+                    mb: m.mb,
+                })
+                .collect(),
+        }
+    });
+    WorkshopView {
+        preset,
+        items: state.items.iter().map(describe).collect(),
+        steam_error,
+    }
+}
+
+async fn get_workshop(
+    State(app): S,
+    caller: Caller,
+    Path(id): Path<u64>,
+) -> ApiResult<Json<WorkshopView>> {
+    let (_, game, def, settings) = with_workshop(&app, &caller, id)?;
+    Ok(Json(workshop_view(&app, id, &game, &def, &settings).await))
+}
+
+async fn add_workshop_item(
+    State(app): S,
+    caller: Caller,
+    Path(id): Path<u64>,
+    Json(req): Json<AddWorkshopItem>,
+) -> ApiResult<Json<WorkshopView>> {
+    let (_, game, def, settings) = with_workshop(&app, &caller, id)?;
+    let item = crate::workshop::parse_link(&req.link).ok_or_else(|| {
+        bad("that is not a Workshop link: copy the address of an item or collection's page")
+    })?;
+    let installer = app.supervisor.installer();
+    let found = installer
+        .workshop()
+        .items(installer.http(), def.app_id, std::slice::from_ref(&item))
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let Some(found) = found.first() else {
+        return Err(bad("Steam does not know that item"));
+    };
+    if let Some(problem) = &found.problem {
+        return Err(bad(format!("{}: {problem}", found.title)));
+    }
+    let dir = app.cfg.server_dir(id);
+    let uid = fsops::uid_of(id);
+    fsops::ensure_server_dir(&dir, uid).context("preparing its directory")?;
+    let mut state = crate::workshop::read_state(&dir, uid).await;
+    if state.items.contains(&item) {
+        return Err(bad(format!("{} is already there", found.title)));
+    }
+    if state.items.len() >= 200 {
+        return Err(bad(
+            "that is a lot of items: put them in a collection and add it",
+        ));
+    }
+    state.items.push(item);
+    crate::workshop::write_state(&dir, uid, &state).await?;
+    Ok(Json(workshop_view(&app, id, &game, &def, &settings).await))
+}
+
+async fn remove_workshop_item(
+    State(app): S,
+    caller: Caller,
+    Path((id, item)): Path<(u64, String)>,
+) -> ApiResult<Json<WorkshopView>> {
+    let (_, game, def, settings) = with_workshop(&app, &caller, id)?;
+    let dir = app.cfg.server_dir(id);
+    let uid = fsops::uid_of(id);
+    let mut state = crate::workshop::read_state(&dir, uid).await;
+    let before = state.items.len();
+    state.items.retain(|i| *i != item);
+    if state.items.len() == before {
+        return Err(not_found("no such item"));
+    }
+    state.expanded.remove(&item);
+    crate::workshop::write_state(&dir, uid, &state).await?;
+    Ok(Json(workshop_view(&app, id, &game, &def, &settings).await))
 }
 
 // ---------------------------------------------------------------- machine and users

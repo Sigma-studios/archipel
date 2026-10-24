@@ -2,7 +2,7 @@
 # 64-bit branch.
 id = "gmod"
 name = "Garry's Mod"
-description = "The physics sandbox: build, or play its gamemodes (Trouble in Terrorist Town). The dedicated server comes from Steam (about 7 GB)."
+description = "The physics sandbox: build, or play Trouble in Terrorist Town, Murder or Prop Hunt with their maps, and anything from the Steam Workshop. The dedicated server comes from Steam (about 7 GB)."
 badge = "🧰"
 memory = { min_mb = 1024, default_mb = 2048 }
 ports = [
@@ -12,12 +12,12 @@ ports = [
 install = { kind = "steamcmd", app_id = 4020, beta = "x86-64" }
 connect = "connect {host}:{port.game}"
 
-# Addons one uploads (.gma); most come from a Workshop collection instead.
+# Addons one uploads (.gma); most come from the Workshop tab instead.
 [addons]
 label = "Addons"
 dir = "garrysmod/addons"
 extensions = ["gma"]
-help = "Addon files (.gma), loaded at the next start. Content from the Steam Workshop is easier as a collection: set its number in Settings, and players download it as they join."
+help = "Addon files (.gma) of your own, loaded at the next start. Anything on the Steam Workshop is easier from the Workshop tab, and players get it from Steam."
 
 [run]
 # srcds_run restarts the server when it crashes, unless -norestart: archipel does.
@@ -30,7 +30,6 @@ command = [
   "-port", "{port.game}",
   "+clientport", "{port.client}",
   "+gamemode", "{setting.gamemode}",
-  "+host_workshop_collection", "{setting.workshop}",
   "+maxplayers", "{setting.max_players}",
   "+map", "{setting.map}",
   "+sv_setsteamaccount", "{setting.token}",
@@ -39,6 +38,32 @@ command = [
 stop_command = "quit"
 stop_timeout_secs = 20
 ready = "Connection to Steam servers successful"
+
+[[settings]]
+key = "gamemode"
+label = "Gamemode"
+help = "archipel brings what the ones listed need from the Workshop (Workshop tab). Gamemodes found in your own Workshop items are listed after them, once the server has started with them."
+type = "choice"
+default = "sandbox"
+options_from = "workshop_gamemodes"
+options = [
+  { value = "sandbox", label = "Sandbox" },
+  { value = "terrortown", label = "Trouble in Terrorist Town" },
+  { value = "murder", label = "Murder" },
+  { value = "prop_hunt", label = "Prop Hunt" },
+]
+
+[[settings]]
+key = "map"
+label = "First map"
+help = "The gamemode's maps, then those found in your Workshop items. The next ones come in turn, or by vote."
+type = "choice"
+default = "gm_construct"
+options_from = "workshop_maps"
+options = [
+  { value = "gm_construct", label = "Construct (gm_construct)" },
+  { value = "gm_flatgrass", label = "Flatgrass (gm_flatgrass)" },
+]
 
 [[settings]]
 key = "hostname"
@@ -68,40 +93,78 @@ help = "Optional. Steam lists servers that have one higher; make one for app 400
 link = "https://steamcommunity.com/dev/managegameservers"
 type = "secret"
 
-[[settings]]
-key = "gamemode"
-label = "Gamemode"
-help = "sandbox or terrortown (Trouble in Terrorist Town) come with the game; others come from the Workshop collection, by their folder name."
-type = "text"
-default = "sandbox"
-max_len = 64
-required = true
+# The Workshop items the server downloads at start: its gamemode's, picked to
+# work without Counter-Strike: Source and to download fast, then its owner's.
+[workshop]
+app_id = 4000
+ids_file = "garrysmod/cfg/srcds_workshop_ids.txt"
+cache_dirs = ["garrysmod/cache/srcds", "steam_cache"]
+lua_file = "garrysmod/lua/autorun/server/archipel_workshop.lua"
+gamemode_setting = "gamemode"
+map_setting = "map"
 
-[[settings]]
-key = "map"
-label = "First map"
-help = "gm_construct or gm_flatgrass come with the game; others come from the Workshop collection."
-type = "text"
-default = "gm_construct"
-max_len = 64
-required = true
+[[workshop.presets]]
+gamemode = "terrortown"
+# MapVote: players vote for the next map when the map's rounds are over.
+items = ["151583504"]
+map_prefixes = ["ttt_"]
+config = """
+ttt_round_limit 6
+ttt_time_limit_minutes 60
+"""
+maps = [
+  { id = "159321088", map = "ttt_minecraft_b5", label = "Minecraft", mb = 4 },
+  { id = "157420728", map = "ttt_waterworld", label = "Waterworld", mb = 12 },
+  { id = "106498411", map = "ttt_mc_skyislands", label = "Sky Islands", mb = 14 },
+  { id = "281454209", map = "ttt_clue_se", label = "Clue", mb = 25 },
+  { id = "295897079", map = "ttt_lego", label = "Lego", mb = 8 },
+  { id = "183797802", map = "ttt_island_2013", label = "Island", mb = 3 },
+  { id = "389346280", map = "ttt_minecraft_haven", label = "Minecraft Haven", mb = 3 },
+  { id = "133911194", map = "ttt_theship_v1", label = "The Ship", mb = 50 },
+]
 
-[[settings]]
-key = "workshop"
-label = "Workshop collection"
-help = "The number at the end of a Steam Workshop collection's address (…?id=123456789): its addons, maps and gamemodes are downloaded at start. Empty: none."
-type = "text"
-default = ""
-max_len = 20
+[[workshop.presets]]
+gamemode = "murder"
+# Murder, by Mechanical Mind.
+items = ["187073946"]
+map_prefixes = ["mu_", "md_", "murder_"]
+map_list_file = "garrysmod/data/murder/maplist.txt"
+config = """
+mu_roundlimit 5
+"""
+maps = [
+  { id = "262374517", map = "mu_abandoned", label = "Abandoned", mb = 1 },
+  { id = "268941847", map = "ph_abandoned_office", label = "Abandoned office", mb = 1 },
+  { id = "159321088", map = "ttt_minecraft_b5", label = "Minecraft", mb = 4 },
+  { id = "225468579", map = "mu_nightmare_church", label = "Nightmare church", mb = 91 },
+]
+
+[[workshop.presets]]
+gamemode = "prop_hunt"
+# Prop Hunt: Enhanced, the maintained Prop Hunt, and ULib and ULX, which its map
+# vote needs (ULX also gives the server's admins their commands).
+items = ["1758906555", "557962238", "557962280"]
+map_prefixes = ["ph_"]
+maps = [
+  { id = "184894018", map = "gm_wwhouse", label = "Walter White's house", mb = 2 },
+  { id = "177889282", map = "ph_warehouse_v2", label = "Warehouse", mb = 1 },
+  { id = "171019775", map = "ph_niteoflivingdead", label = "Night of the Living Dead", mb = 1 },
+  { id = "181276343", map = "ph_building_a3", label = "Building", mb = 1 },
+  { id = "185868094", map = "ph_house_a1", label = "House", mb = 1 },
+  { id = "184568395", map = "ph_wasteland", label = "Wasteland", mb = 1 },
+  { id = "375116509", map = "ph_fancyhouse", label = "Fancy house", mb = 30 },
+]
 
 [[files]]
 path = "garrysmod/cfg/archipel.cfg"
 format = "text"
 content = """
 // Written by archipel at each start, from the server's settings, and run at
-// every map change. Your own settings go in server.cfg, read first.
+// every map change. Your own settings go in server.cfg, read after the
+// gamemode's.
 sv_allowdownload 1
 net_maxfilesize 64
+{workshop.config}
 exec server.cfg
 hostname "{setting.hostname}"
 sv_password "{setting.password}"
@@ -113,9 +176,12 @@ label = "Your settings (server.cfg)"
 format = "text"
 editable = true
 initial = """
-// Your server's own settings, run at every map change before the ones from
-// its settings page.
-sbox_maxprops 150\nsbox_noclip 1\nsv_allowcslua 0\n"""
+// Your server's own settings, run at every map change after the gamemode's
+// and before the ones from its settings page.
+sbox_maxprops 150
+sbox_noclip 1
+sv_allowcslua 0
+"""
 
 # Typed into the server's console, without a slash.
 [[commands]]
