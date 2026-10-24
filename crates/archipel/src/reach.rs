@@ -16,13 +16,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use archipel_core::api::ReachState;
+use archipel_core::api::{ReachState, Settings};
 use archipel_core::game::Protocol;
 use igd_next::PortMappingProtocol;
 use igd_next::aio::Gateway;
 use igd_next::aio::tokio::Tokio;
 use parking_lot::Mutex;
 use tracing::{debug, info};
+
+use crate::store::Store;
 
 /// Where UPnP devices listen for searches.
 const SSDP: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
@@ -869,9 +871,123 @@ fn gateway() -> Option<Ipv4Addr> {
     })
 }
 
+// ---------------------------------------------------------------- settings
+
+/// The hosted archipel asked to check from outside, unless the settings name
+/// another (or none).
+pub const DEFAULT_PROBE_URL: &str = "https://games.sigma-dev.eu";
+const PROBE_URL: &str = "probe_url";
+const PUBLIC_HOST: &str = "public_host";
+
+/// The desktop's settings: an unset URL is the default one, an empty one turns
+/// checking off.
+pub fn settings(store: &Store) -> anyhow::Result<Settings> {
+    Ok(Settings {
+        probe_url: store
+            .setting(PROBE_URL)?
+            .unwrap_or_else(|| DEFAULT_PROBE_URL.into()),
+        default_probe_url: DEFAULT_PROBE_URL.into(),
+        public_host: store.setting(PUBLIC_HOST)?.unwrap_or_default(),
+    })
+}
+
+/// Settings as they are saved, once seen to be valid: `None` is unset (the
+/// default URL stays "the default", to follow later versions').
+#[derive(Debug, PartialEq)]
+pub struct Saved {
+    probe_url: Option<String>,
+    public_host: Option<String>,
+}
+
+impl Saved {
+    pub fn from(new: &Settings) -> Result<Saved, String> {
+        let url = new.probe_url.trim().trim_end_matches('/');
+        let probe_url = match url {
+            "" => Some(String::new()),
+            url if url == DEFAULT_PROBE_URL => None,
+            url => {
+                let parsed = reqwest::Url::parse(url).ok().filter(|u| {
+                    let local = matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+                    (u.scheme() == "https" || (u.scheme() == "http" && local))
+                        && u.host_str().is_some()
+                        && u.path() == "/"
+                        && u.query().is_none()
+                        && u.fragment().is_none()
+                        && u.username().is_empty()
+                });
+                if parsed.is_none() {
+                    return Err(format!(
+                        "{url} is not the address of an archipel: give one like {DEFAULT_PROBE_URL}"
+                    ));
+                }
+                Some(url.to_string())
+            }
+        };
+        let public_host = match new.public_host.trim() {
+            "" => None,
+            host => Some(crate::probe::dns_name(host).ok_or_else(|| {
+                format!("{host} is not a hostname: give one like yourname.ddns.net")
+            })?),
+        };
+        Ok(Saved {
+            probe_url,
+            public_host,
+        })
+    }
+
+    pub fn save(&self, store: &Store) -> anyhow::Result<()> {
+        store.set_setting(PROBE_URL, self.probe_url.as_deref())?;
+        store.set_setting(PUBLIC_HOST, self.public_host.as_deref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saves_only_valid_settings() {
+        let saved = |url: &str, host: &str| {
+            Saved::from(&Settings {
+                probe_url: url.into(),
+                default_probe_url: String::new(),
+                public_host: host.into(),
+            })
+        };
+        assert_eq!(
+            saved(" https://games.sigma-dev.eu/ ", ""),
+            Ok(Saved {
+                probe_url: None,
+                public_host: None
+            })
+        );
+        assert_eq!(
+            saved("", "Sigma-Dev.ddns.net"),
+            Ok(Saved {
+                probe_url: Some(String::new()),
+                public_host: Some("sigma-dev.ddns.net".into())
+            })
+        );
+        assert_eq!(
+            saved("http://localhost:7810", "")
+                .unwrap()
+                .probe_url
+                .as_deref(),
+            Some("http://localhost:7810")
+        );
+        assert!(saved("https://games.example.com", "").is_ok());
+        for bad in [
+            "http://games.example.com",
+            "games.example.com",
+            "https://games.example.com/api",
+            "https://games.example.com/?x=1",
+            "ftp://games.example.com",
+        ] {
+            assert!(saved(bad, "").is_err(), "{bad}");
+        }
+        assert!(saved("", "not a host").is_err());
+        assert!(saved("", "86.245.1.2").is_err());
+    }
 
     #[test]
     fn reads_a_routers_description() {

@@ -55,6 +55,8 @@ does); `local` is the address on the home network, `detail` what went wrong.
 | `GET /api/overview` | | `Overview` (any user may read it) |
 | `GET /api/internet` | | `Internet` (desktop app): whether friends could reach this computer, from a test forwarding asked of the router when the app opens; 404 hosted |
 | `POST /api/internet/check` | | `Internet`, `checking` until the new check is done |
+| `GET /api/settings` | | `Settings` (desktop app): the archipel asked to check from outside (`probe_url`, empty when off; `default_probe_url`) and the hostname for friends (`public_host`); 404 hosted |
+| `PUT /api/settings` | `Settings` | `Settings`; a change checks again, as `POST /api/internet/check`. `probe_url` is empty or `https://…` (`http://localhost…` for development), `public_host` empty or a hostname |
 | `GET /api/users` | | `Vec<UserView>` |
 | `POST /api/users` | `CreateUser` | `UserView` |
 | `PUT /api/users/{username}` | `UpdateUser` | `UserView` |

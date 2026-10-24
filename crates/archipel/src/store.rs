@@ -1,4 +1,4 @@
-//! SQLite persistence: users, sessions, servers. One mutex-guarded connection:
+//! SQLite persistence: users, sessions, servers, the desktop's settings. One mutex-guarded connection:
 //! queries are tiny.
 
 use std::collections::BTreeMap;
@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS servers (
     auto_start INTEGER NOT NULL DEFAULT 0,
     installed TEXT,
     created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 "#;
 
@@ -423,6 +427,33 @@ impl Store {
             .execute("DELETE FROM servers WHERE id = ?1", [id])?;
         Ok(())
     }
+
+    // ---- settings
+
+    /// A setting, if set.
+    pub fn setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .0
+            .lock()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// Sets a setting, or unsets it (`None`): back to its default.
+    pub fn set_setting(&self, key: &str, value: Option<&str>) -> anyhow::Result<()> {
+        let conn = self.0.lock();
+        match value {
+            Some(value) => conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?,
+            None => conn.execute("DELETE FROM settings WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +511,29 @@ mod tests {
                 .create_server(&new(alice.id, "d", "puck", &two), pool)
                 .is_err()
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_settings_until_unset() {
+        let dir = std::env::temp_dir().join(format!("archipel-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("test.db")).unwrap();
+        assert_eq!(store.setting("public_host").unwrap(), None);
+        store
+            .set_setting("public_host", Some("a.ddns.net"))
+            .unwrap();
+        store
+            .set_setting("public_host", Some("b.ddns.net"))
+            .unwrap();
+        assert_eq!(
+            store.setting("public_host").unwrap().as_deref(),
+            Some("b.ddns.net")
+        );
+        store.set_setting("probe_url", Some("")).unwrap();
+        assert_eq!(store.setting("probe_url").unwrap().as_deref(), Some(""));
+        store.set_setting("public_host", None).unwrap();
+        assert_eq!(store.setting("public_host").unwrap(), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
