@@ -418,6 +418,57 @@ pub struct SaveFile {
     pub content: String,
 }
 
+/// A server's addons: the files its owner added (plugins, maps).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddonsView {
+    /// The ones there, by name.
+    pub files: Vec<AddonFile>,
+    /// Settings they need and the server lacks, as labels: "Server: paper".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet: Vec<String>,
+    /// The game version a search looks for: `1.21.4`. None until it is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddonFile {
+    pub name: String,
+    pub bytes: u64,
+    /// Seconds since the epoch.
+    pub modified: u64,
+    /// Maps it holds (`.pk3` archives), when it is not one itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maps: Vec<String>,
+}
+
+/// An addon found in the game's catalogue (Modrinth).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddonResult {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub author: String,
+    pub downloads: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+    /// Its page in the catalogue.
+    pub url: String,
+}
+
+/// Installs an addon from the catalogue, with what it requires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallAddon {
+    pub id: String,
+}
+
+/// What an install added.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledAddons {
+    /// File names, the one asked for first, then what it requires.
+    pub files: Vec<String>,
+}
+
 /// The machine, as archipel sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Overview {

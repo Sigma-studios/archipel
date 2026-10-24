@@ -9,6 +9,14 @@ ports = [{ name = "game", protocol = "udp", label = "Game" }]
 install = { kind = "shared", url = "http://cdn.urbanterror.info/urt/43/releases/zips/UrbanTerror434_full.zip", subdir = "UrbanTerror43" }
 connect = "/connect {host}:{port.game}"
 
+# Maps of one's own: .pk3 archives next to the server's settings, read with the
+# game's at start.
+[addons]
+label = "Maps"
+dir = "q3ut4"
+extensions = ["pk3"]
+help = "Map packs (.pk3), from sites such as urt.li. They load at the next start; players who lack one download it from the server as they join. Add a map to the map cycle (Files tab) to play it in turn, or pick it as the first map."
+
 [run]
 command = [
   "{base}/Quake3-UrT-Ded.x86_64",
@@ -50,10 +58,47 @@ options = [
 [[settings]]
 key = "map"
 label = "First map"
-help = "The next ones come from the map cycle (Files tab)."
-type = "text"
+help = "The next ones come from the map cycle (Files tab). Maps added in the Maps tab are listed after the game's own."
+type = "choice"
 default = "ut4_turnpike"
-max_len = 64
+options_from = "maps"
+options = [
+  { value = "ut4_abbey", label = "Abbey" },
+  { value = "ut4_algiers", label = "Algiers" },
+  { value = "ut4_austria", label = "Austria" },
+  { value = "ut4_bohemia", label = "Bohemia" },
+  { value = "ut4_casa", label = "Casa" },
+  { value = "ut4_cascade", label = "Cascade" },
+  { value = "ut4_docks", label = "Docks" },
+  { value = "ut4_dressingroom", label = "Dressing room" },
+  { value = "ut4_eagle", label = "Eagle" },
+  { value = "ut4_elgin", label = "Elgin" },
+  { value = "ut4_firingrange", label = "Firing range" },
+  { value = "ut4_ghosttown", label = "Ghost town" },
+  { value = "ut4_herring", label = "Herring" },
+  { value = "ut4_jumpents", label = "Jump training" },
+  { value = "ut4_killroom", label = "Killroom" },
+  { value = "ut4_kingdom", label = "Kingdom" },
+  { value = "ut4_kingpin", label = "Kingpin" },
+  { value = "ut4_mandolin", label = "Mandolin" },
+  { value = "ut4_mykonos_a17", label = "Mykonos" },
+  { value = "ut4_oildepot", label = "Oil depot" },
+  { value = "ut4_paris", label = "Paris" },
+  { value = "ut4_prague", label = "Prague" },
+  { value = "ut4_prominence", label = "Prominence" },
+  { value = "ut4_raiders", label = "Raiders" },
+  { value = "ut4_ramelle", label = "Ramelle" },
+  { value = "ut4_ricochet", label = "Ricochet" },
+  { value = "ut4_riyadh", label = "Riyadh" },
+  { value = "ut4_sanc", label = "Sanc" },
+  { value = "ut4_suburbs", label = "Suburbs" },
+  { value = "ut4_subway", label = "Subway" },
+  { value = "ut4_swim", label = "Swim" },
+  { value = "ut4_thingley", label = "Thingley" },
+  { value = "ut4_tombs", label = "Tombs" },
+  { value = "ut4_turnpike", label = "Turnpike" },
+  { value = "ut4_uptown", label = "Uptown" },
+]
 
 [[settings]]
 key = "max_players"
@@ -93,6 +138,8 @@ format = "text"
 content = """
 // Written by archipel at each start, from the server's settings. Your own
 // settings go in server.cfg, read first.
+// Players lacking a map from the Maps tab get it from the server.
+set sv_allowdownload "1"
 exec server.cfg
 set sv_hostname "{setting.hostname}"
 set g_gametype "{setting.gametype}"
@@ -134,3 +181,91 @@ ut4_uptown
 ut4_tombs
 ut4_ramelle
 """
+
+# Typed into the server's console, without a slash.
+[[commands]]
+name = "status"
+help = "Who is connected, with their slot numbers and addresses"
+
+[[commands]]
+name = "map"
+args = "<map>"
+help = "Change the map now: map ut4_casa"
+
+[[commands]]
+name = "cyclemap"
+help = "Go to the next map of the cycle"
+
+[[commands]]
+name = "map_restart"
+help = "Restart the current map"
+
+[[commands]]
+name = "say"
+args = "<message>"
+help = "Talk to every player"
+
+[[commands]]
+name = "bigtext"
+args = "\"<message>\""
+help = "Show a message in the middle of everyone's screen"
+
+[[commands]]
+name = "kick"
+args = "<player>"
+help = "Throw a player out (part of their name, or their slot number)"
+
+[[commands]]
+name = "forceteam"
+args = "<player> <red|blue|spectator>"
+help = "Put a player in a team"
+
+[[commands]]
+name = "swapteams"
+help = "Swap the red and blue teams"
+
+[[commands]]
+name = "shuffleteams"
+help = "Mix the teams up"
+
+[[commands]]
+name = "mute"
+args = "<player>"
+help = "Stop a player from talking, or let them again"
+
+[[commands]]
+name = "slap"
+args = "<player>"
+help = "Slap a player (it hurts a little)"
+
+[[commands]]
+name = "nuke"
+args = "<player>"
+help = "Blow a player up"
+
+[[commands]]
+name = "veto"
+help = "Cancel the vote in progress"
+
+[[commands]]
+name = "g_gametype"
+args = "<number>"
+help = "Game type from the next map: 0 free for all, 3 team deathmatch, 4 team survivor, 7 capture the flag, 8 bomb"
+
+[[commands]]
+name = "timelimit"
+args = "<minutes>"
+help = "Time limit of each map"
+
+[[commands]]
+name = "g_password"
+args = "<password>"
+help = "Password to join; \"\" for none"
+
+[[commands]]
+name = "serverinfo"
+help = "The server's settings"
+
+[[commands]]
+name = "quit"
+help = "Stop the server"

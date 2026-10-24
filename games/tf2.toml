@@ -1,0 +1,253 @@
+# Team Fortress 2: Valve's class-based team shooter, its dedicated server from
+# Steam (64-bit).
+id = "tf2"
+name = "Team Fortress 2"
+description = "Valve's class-based team shooter. The dedicated server comes from Steam: a big download (about 12 GB)."
+badge = "🔧"
+memory = { min_mb = 1024, default_mb = 1536 }
+ports = [
+  { name = "game", protocol = "udp", label = "Game" },
+  { name = "client", protocol = "udp", label = "Client (outgoing)" },
+]
+install = { kind = "steamcmd", app_id = 232250 }
+connect = "connect {host}:{port.game}"
+
+# Maps of one's own: .bsp files in tf/maps, next to the game's.
+[addons]
+label = "Maps"
+dir = "tf/maps"
+extensions = ["bsp"]
+help = "The game's maps are here too. Add your own .bsp files: they can be picked as the first map, or changed to with changelevel. Players who lack one download it from the server as they join (64 MB at most)."
+
+[run]
+# srcds_run restarts the server when it crashes, unless -norestart: archipel does.
+command = [
+  "./srcds_run_64",
+  "-game", "tf",
+  "-console",
+  "-norestart",
+  "-strictportbind",
+  "-port", "{port.game}",
+  "+clientport", "{port.client}",
+  "+maxplayers", "{setting.max_players}",
+  "+map", "{setting.map}",
+  "+sv_setsteamaccount", "{setting.token}",
+  "+servercfgfile", "archipel.cfg",
+]
+stop_command = "quit"
+stop_timeout_secs = 20
+ready = "Connection to Steam servers successful"
+
+[[settings]]
+key = "hostname"
+label = "Server name"
+type = "text"
+default = "An archipel server"
+max_len = 64
+
+[[settings]]
+key = "max_players"
+label = "Players"
+type = "number"
+default = 24
+min = 2
+max = 32
+
+[[settings]]
+key = "password"
+label = "Password to join"
+help = "Empty: anyone can join."
+type = "secret"
+
+[[settings]]
+key = "token"
+label = "Steam game server token"
+help = "Optional. Steam lists servers that have one higher; make one for app 440 on the page linked."
+link = "https://steamcommunity.com/dev/managegameservers"
+type = "secret"
+
+[[settings]]
+key = "map"
+label = "First map"
+help = "The next ones come from the map cycle (Files tab). Maps added in the Maps tab are listed after the game's own."
+type = "choice"
+default = "ctf_2fort"
+options_from = "maps"
+options = [
+  { value = "ctf_2fort", label = "2Fort (capture the flag)" },
+  { value = "cp_5gorge", label = "5Gorge (control points)" },
+  { value = "cp_badlands", label = "Badlands (control points)" },
+  { value = "koth_badlands", label = "Badlands (king of the hill)" },
+  { value = "pl_badwater", label = "Badwater Basin (payload)" },
+  { value = "pl_barnblitz", label = "Barnblitz (payload)" },
+  { value = "cp_coldfront", label = "Coldfront (control points)" },
+  { value = "cp_degrootkeep", label = "DeGroot Keep (control points)" },
+  { value = "sd_doomsday", label = "Doomsday (special delivery)" },
+  { value = "ctf_doublecross", label = "Double Cross (capture the flag)" },
+  { value = "cp_dustbowl", label = "Dustbowl (control points)" },
+  { value = "cp_egypt_final", label = "Egypt (control points)" },
+  { value = "cp_fastlane", label = "Fastlane (control points)" },
+  { value = "cp_foundry", label = "Foundry (control points)" },
+  { value = "cp_freight_final1", label = "Freight (control points)" },
+  { value = "pl_frontier_final", label = "Frontier (payload)" },
+  { value = "pl_goldrush", label = "Gold Rush (payload)" },
+  { value = "cp_gorge", label = "Gorge (control points)" },
+  { value = "cp_granary", label = "Granary (control points)" },
+  { value = "cp_gravelpit", label = "Gravel Pit (control points)" },
+  { value = "cp_gullywash_final1", label = "Gullywash (control points)" },
+  { value = "koth_harvest_final", label = "Harvest (king of the hill)" },
+  { value = "plr_hightower", label = "Hightower (payload race)" },
+  { value = "pl_hoodoo_final", label = "Hoodoo (payload)" },
+  { value = "tc_hydro", label = "Hydro (territorial control)" },
+  { value = "cp_junction_final", label = "Junction (control points)" },
+  { value = "koth_king", label = "King (king of the hill)" },
+  { value = "koth_lakeside_final", label = "Lakeside (king of the hill)" },
+  { value = "cp_metalworks", label = "Metalworks (control points)" },
+  { value = "cp_mountainlab", label = "Mountain Lab (control points)" },
+  { value = "plr_nightfall_final", label = "Nightfall (payload race)" },
+  { value = "koth_nucleus", label = "Nucleus (king of the hill)" },
+  { value = "plr_pipeline", label = "Pipeline (payload race)" },
+  { value = "cp_process_final", label = "Process (control points)" },
+  { value = "ctf_sawmill", label = "Sawmill (capture the flag)" },
+  { value = "koth_sawmill", label = "Sawmill (king of the hill)" },
+  { value = "cp_snakewater_final1", label = "Snakewater (control points)" },
+  { value = "cp_standin_final", label = "Standin (control points)" },
+  { value = "cp_steel", label = "Steel (control points)" },
+  { value = "cp_sunshine", label = "Sunshine (control points)" },
+  { value = "pl_swiftwater_final1", label = "Swiftwater (payload)" },
+  { value = "pl_thundermountain", label = "Thunder Mountain (payload)" },
+  { value = "ctf_turbine", label = "Turbine (capture the flag)" },
+  { value = "pl_upward", label = "Upward (payload)" },
+  { value = "koth_viaduct", label = "Viaduct (king of the hill)" },
+  { value = "ctf_well", label = "Well (capture the flag)" },
+  { value = "cp_well", label = "Well (control points)" },
+  { value = "cp_yukon_final", label = "Yukon (control points)" },
+]
+
+[[files]]
+path = "tf/cfg/archipel.cfg"
+format = "text"
+content = """
+// Written by archipel at each start, from the server's settings, and run at
+// every map change. Your own settings go in server.cfg, read first.
+sv_allowdownload 1
+net_maxfilesize 64
+exec server.cfg
+hostname "{setting.hostname}"
+sv_password "{setting.password}"
+"""
+
+[[files]]
+path = "tf/cfg/server.cfg"
+label = "Your settings (server.cfg)"
+format = "text"
+editable = true
+initial = """
+// Your server's own settings, run at every map change before the ones from
+// its settings page.
+mp_timelimit 30\nmp_autoteambalance 1\nsv_alltalk 0\ntf_bot_quota 0\n"""
+
+[[files]]
+path = "tf/cfg/mapcycle.txt"
+label = "Map cycle"
+format = "text"
+editable = true
+initial = """
+ctf_2fort
+cp_badlands
+cp_dustbowl
+cp_granary
+cp_gravelpit
+cp_well
+tc_hydro
+ctf_well
+pl_goldrush
+cp_fastlane
+ctf_turbine
+pl_badwater
+cp_steel
+cp_egypt_final
+cp_junction_final
+plr_pipeline
+"""
+
+# Typed into the server's console, without a slash.
+[[commands]]
+name = "tf_bot_add"
+args = "[count] [class] [red|blue] [easy|normal|hard|expert]"
+help = "Add bots: tf_bot_add 4"
+
+[[commands]]
+name = "tf_bot_kick"
+args = "all"
+help = "Remove the bots"
+
+[[commands]]
+name = "tf_bot_quota"
+args = "<count>"
+help = "Keep that many players, bots filling in"
+
+[[commands]]
+name = "mp_scrambleteams"
+help = "Mix the teams up"
+
+[[commands]]
+name = "status"
+help = "Who is connected, with their user ids"
+
+[[commands]]
+name = "changelevel"
+args = "<map>"
+help = "Change the map now"
+
+[[commands]]
+name = "say"
+args = "<message>"
+help = "Talk to every player"
+
+[[commands]]
+name = "kick"
+args = "<name>"
+help = "Throw a player out"
+
+[[commands]]
+name = "kickid"
+args = "<userid> [reason]"
+help = "Throw a player out by the id status shows"
+
+[[commands]]
+name = "banid"
+args = "<minutes> <userid> kick"
+help = "Ban a player (0 minutes: for good) and throw them out"
+
+[[commands]]
+name = "writeid"
+help = "Save the bans made with banid"
+
+[[commands]]
+name = "mp_timelimit"
+args = "<minutes>"
+help = "Time limit of each map"
+
+[[commands]]
+name = "mp_restartgame"
+args = "<seconds>"
+help = "Restart the game after that many seconds"
+
+[[commands]]
+name = "sv_password"
+args = "<password>"
+help = "Password to join; \"\" for none"
+
+[[commands]]
+name = "exec"
+args = "<file.cfg>"
+help = "Run a configuration file of the cfg folder"
+
+[[commands]]
+name = "stats"
+help = "How busy the server is"
+
+[[commands]]
+name = "quit"
+help = "Stop the server"

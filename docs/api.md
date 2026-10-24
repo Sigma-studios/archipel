@@ -37,6 +37,12 @@ request is its one user's, and there is no `POST /api/login`.
 | `POST /api/servers/{id}/console` | `CommandRequest` | 204; typed into the server's console |
 | `GET /api/servers/{id}/files` | | `Vec<FileView>`: the files its owner may edit |
 | `PUT /api/servers/{id}/files?path=<path>` | `SaveFile` | `FileView` |
+| `GET /api/servers/{id}/addons` | | `AddonsView`: the files in its game's `[addons]` directory, the settings they need that it lacks (`unmet`), and the game version a search looks for |
+| `PUT /api/servers/{id}/addons/files/{name}` | the file's bytes | 204; adds or replaces it (512 MB at most; hosted, within the owner's disk quota). 400 for a name without one of the game's extensions |
+| `DELETE /api/servers/{id}/addons/files/{name}` | | 204 |
+| `GET /api/servers/{id}/addons/search?q=<text>` | | `Vec<AddonResult>`: from the game's catalogue (`search = "modrinth"`: Paper plugins for its Minecraft version); the most downloaded without `q` |
+| `POST /api/servers/{id}/addons/install` | `InstallAddon` | `InstalledAddons`; downloads the project's newest release for that version, and what it requires that is not there yet. Installing one again replaces its file |
+| `GET /api/games/{game}/options/{key}?<setting>=<value>&_server=<id>` | | `Vec<ChoiceOption>`: a `choice` setting's options, with those archipel lists (`options_from`); `_server` for the maps among that server's addons |
 
 `ServerView.connect` may contain `{host}`: replace it with the address the page is
 browsed at (`window.location.hostname`). Settings are `Value`s: a JSON string,

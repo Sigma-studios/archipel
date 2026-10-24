@@ -1,5 +1,6 @@
 # archipel's image: the web UI (WebAssembly) and the server that embeds it, on a
-# slim Debian with what game servers need (SteamCMD wants 32-bit libraries).
+# slim Debian with what game servers need (SteamCMD and Fistful of Frags want
+# 32-bit libraries, Source servers libcurl and libtinfo).
 
 FROM rust:1-bookworm AS build
 ARG TRUNK_VERSION=0.21.14
@@ -18,7 +19,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN set -eux; extra=""; \
     if [ "$(dpkg --print-architecture)" = amd64 ]; then \
-      dpkg --add-architecture i386; extra="lib32gcc-s1 lib32stdc++6 libc6:i386"; \
+      dpkg --add-architecture i386; \
+      extra="lib32gcc-s1 lib32stdc++6 libc6:i386 libcurl3-gnutls libcurl3-gnutls:i386 libtinfo5 libtinfo5:i386"; \
     fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates tar gzip $extra; \

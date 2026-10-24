@@ -17,6 +17,9 @@ const BUILT_IN: &[(&str, &str)] = &[
         include_str!("../../../games/urbanterror.toml"),
     ),
     ("puck.toml", include_str!("../../../games/puck.toml")),
+    ("tf2.toml", include_str!("../../../games/tf2.toml")),
+    ("gmod.toml", include_str!("../../../games/gmod.toml")),
+    ("fof.toml", include_str!("../../../games/fof.toml")),
 ];
 
 #[derive(Default)]

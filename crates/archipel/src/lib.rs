@@ -2,6 +2,7 @@
 //! of it, or on one's own desktop. Hosted, it runs as one app on facade; on a
 //! desktop, inside the desktop app. Game servers are its own processes either way.
 
+pub mod addons;
 pub mod api;
 pub mod cgroups;
 pub mod config;

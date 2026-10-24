@@ -24,7 +24,18 @@ friends on their own computer ([below](#on-your-own-computer)).
 
 Games: **Minecraft** (vanilla or Paper, any version; Java is fetched to match),
 **Urban Terror** 4.3 (its 1.4 GB of files downloaded once, shared by every server),
-**Puck** (from Steam). Adding one is writing a file (below).
+and from Steam **Puck**, **Team Fortress 2**, **Garry's Mod** and **Fistful of
+Frags**. Adding one is writing a file (below).
+
+Servers take files of their own in a tab named after them: **Plugins** for Paper
+(uploaded, or found on [Modrinth](https://modrinth.com/plugins) for the server's
+Minecraft version and installed with the plugins they require), **Maps** for Urban
+Terror (`.pk3`), Team Fortress 2 and Fistful of Frags (`.bsp`), **Addons** for
+Garry's Mod (`.gma`; a Workshop collection, set in its settings, is easier). Maps
+added there are offered as the server's first map. The console offers the game's
+commands as one types (Tab completes them), and lists them all on Tab with nothing
+typed or from its Commands button; none take a slash, and a slash typed out of habit
+before a known command is dropped.
 
 ## Deploying on facade
 
@@ -46,7 +57,9 @@ facade deploy archipel
 
 Then log in at `https://games.example.com` as `admin`, create users and give them
 quotas. Players connect to `games.example.com:<port>`: the domain points at the node,
-and the ports are published there. The node must run x86_64 for Urban Terror and Puck.
+and the ports are published there. The node must run x86_64 for every game but
+Minecraft. Steam games install in each server's directory: Team Fortress 2 takes
+about 12 GB, so size disk quotas for it.
 
 * **Memory and CPU**: archipel shares out its container's limits (`--memory`,
   `--cpus`) less 256 MB for itself (`ARCHIPEL_RESERVE_MB`). A server's memory is a hard
@@ -123,8 +136,10 @@ point to this connection; otherwise they keep the IP address and say why.
 
 Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
 the games archipel downloads (Java, SteamCMD, Urban Terror) are built for usual
-distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`. SteamCMD (Puck) needs 32-bit libraries on
-x86_64 (`lib32gcc-s1` on Debian and Ubuntu); Urban Terror and Puck need x86_64.
+distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`. SteamCMD (every Steam game) needs 32-bit libraries on
+x86_64 (`lib32gcc-s1` on Debian and Ubuntu), and so does Fistful of Frags's server
+(`lib32stdc++6`); Source servers also want `libcurl3-gnutls` and `libtinfo5`. Every
+game but Minecraft needs x86_64.
 
 ## How servers are kept apart
 
@@ -179,11 +194,30 @@ set = { port = "{port.game}", name = "{setting.name}" }
 
 A `choice` can also list options archipel fetches itself, after its own: with
 `options_from = "minecraft_versions"`, Minecraft's releases, newest first (those
-Paper builds when the `flavor` setting is `paper`).
+Paper builds when the `flavor` setting is `paper`); with `options_from = "maps"`,
+the maps among the server's addons.
+
+A game may take files of its owner's (`[addons]`), shown in a tab of their own,
+and list its console commands (`[[commands]]`), offered as one types:
+
+```toml
+[addons]
+label = "Maps"                  # the tab's name
+dir = "maps"                    # in the server's directory
+extensions = ["bsp"]            # the files that count there
+help = "Shown above the list."
+when = { flavor = "paper" }     # settings they need (optional)
+search = "modrinth"             # Paper plugins on Modrinth (optional)
+
+[[commands]]
+name = "kick"
+args = "<player>"
+help = "Throw a player out"
+```
 
 Installs are `minecraft`, `shared` (an archive downloaded once, read-only for every
-server: `{base}`) or `steamcmd` (`app_id`, anonymous login, in each server's
-directory). Templates use `{port.<name>}`, `{setting.<key>}`, `{memory_mb}`,
+server: `{base}`) or `steamcmd` (`app_id`, and `beta` for a branch of it, anonymous
+login, in each server's directory). Templates use `{port.<name>}`, `{setting.<key>}`, `{memory_mb}`,
 `{java_memory_mb}`, `{dir}`, `{base}` and `{java}`; a value that is a single
 placeholder keeps its type in JSON. See [`games/`](games/) for complete examples.
 

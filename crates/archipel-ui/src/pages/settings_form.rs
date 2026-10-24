@@ -32,6 +32,9 @@ pub fn SettingsFields(
     /// On an existing server: settings that reinstall say so.
     #[prop(optional)]
     editing: bool,
+    /// The server edited, whose own files (maps) some choices list.
+    #[prop(optional)]
+    server: Option<u64>,
 ) -> impl IntoView {
     if game.settings.is_empty() {
         return view! { <p class="muted">"This game has nothing to set up."</p> }.into_any();
@@ -48,7 +51,7 @@ pub fn SettingsFields(
         <div class="form-grid">
             {game.settings.into_iter().map(|def| {
                 let (game_id, choices) = (game_id.clone(), choices.clone());
-                view! { <SettingField def values editing game_id choices/> }
+                view! { <SettingField def values editing game_id choices server/> }
             }).collect_view()}
         </div>
     }
@@ -62,6 +65,7 @@ fn SettingField(
     editing: bool,
     game_id: String,
     choices: Vec<String>,
+    server: Option<u64>,
 ) -> impl IntoView {
     let id = format!("setting-{}", def.key);
     let key = StoredValue::new(def.key.clone());
@@ -180,16 +184,17 @@ fn SettingField(
             let path = StoredValue::new(format!("/api/games/{game_id}/options/{}", def.key));
             let others = StoredValue::new(choices);
             let listed = polled(None, move || {
-                let query = values.with(|v| {
+                let mut query = values.with(|v| {
                     others.with_value(|keys| {
                         keys.iter()
                             .filter(|k| key.with_value(|me| *k != me))
                             .filter_map(|k| v.get(k).map(|val| (k, val.as_text())))
                             .map(|(k, val)| format!("{}={}", encode(k), encode(&val)))
                             .collect::<Vec<_>>()
-                            .join("&")
                     })
                 });
+                query.extend(server.map(|id| format!("_server={id}")));
+                let query = query.join("&");
                 let url = format!("{}?{query}", path.get_value());
                 async move { api::get::<Vec<ChoiceOption>>(&url).await }
             });
@@ -219,7 +224,7 @@ fn SettingField(
                         }).collect_view()}
                     </select>
                     {move || listed.error.get().map(|_| view! {
-                        <small class="field-help">"The list of versions is unavailable right now."</small>
+                        <small class="field-help">"The full list is unavailable right now."</small>
                     })}
                     {help}{link}{reinstall}
                 </div>

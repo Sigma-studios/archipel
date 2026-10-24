@@ -20,6 +20,15 @@ stop_command = "stop"
 stop_timeout_secs = 90
 ready = "Done ("
 
+# Paper loads the plugins in plugins/ at start.
+[addons]
+label = "Plugins"
+dir = "plugins"
+extensions = ["jar"]
+when = { flavor = "paper" }
+search = "modrinth"
+help = "Plugins load when the server starts, so restart it after adding or removing one. Most keep their settings in a folder of their own next to them, created at their first start."
+
 [backup]
 before = ["save-off", "save-all flush"]
 wait_for = "Saved the game"
@@ -141,3 +150,132 @@ label = "Server properties"
 format = "properties"
 editable = true
 set = { "server-port" = "{port.game}", "query.port" = "{port.game}", "motd" = "{setting.motd}", "max-players" = "{setting.max_players}", "gamemode" = "{setting.gamemode}", "difficulty" = "{setting.difficulty}", "pvp" = "{setting.pvp}", "white-list" = "{setting.whitelist}", "enforce-whitelist" = "{setting.whitelist}", "online-mode" = "{setting.online_mode}", "view-distance" = "{setting.view_distance}", "level-seed" = "{setting.seed}", "enable-rcon" = "false" }
+
+# Typed into the server's console, without the slash used in the game's chat.
+[[commands]]
+name = "help"
+help = "Every command, or help on one"
+
+[[commands]]
+name = "list"
+help = "Who is online"
+
+[[commands]]
+name = "say"
+args = "<message>"
+help = "Talk to every player"
+
+[[commands]]
+name = "op"
+args = "<player>"
+help = "Give a player every power, commands included"
+
+[[commands]]
+name = "deop"
+args = "<player>"
+help = "Take them back"
+
+[[commands]]
+name = "whitelist add"
+args = "<player>"
+help = "Let a player join when the whitelist is on"
+
+[[commands]]
+name = "whitelist remove"
+args = "<player>"
+help = "Take them off the whitelist"
+
+[[commands]]
+name = "whitelist list"
+help = "Who is on the whitelist"
+
+[[commands]]
+name = "whitelist on"
+help = "Only players on the whitelist can join"
+
+[[commands]]
+name = "whitelist off"
+help = "Anyone can join"
+
+[[commands]]
+name = "kick"
+args = "<player> [reason]"
+help = "Throw a player out"
+
+[[commands]]
+name = "ban"
+args = "<player> [reason]"
+help = "Ban a player"
+
+[[commands]]
+name = "pardon"
+args = "<player>"
+help = "Lift a ban"
+
+[[commands]]
+name = "banlist"
+help = "Who is banned"
+
+[[commands]]
+name = "gamemode"
+args = "<survival|creative|adventure|spectator> [player]"
+help = "Change a player's game mode"
+
+[[commands]]
+name = "difficulty"
+args = "<peaceful|easy|normal|hard>"
+help = "Change the difficulty"
+
+[[commands]]
+name = "time set"
+args = "<day|night|noon|midnight>"
+help = "Change the time of day"
+
+[[commands]]
+name = "weather"
+args = "<clear|rain|thunder>"
+help = "Change the weather"
+
+[[commands]]
+name = "tp"
+args = "<player> <target player>"
+help = "Teleport a player to another"
+
+[[commands]]
+name = "give"
+args = "<player> <item> [count]"
+help = "Give a player items: give Steve diamond 5"
+
+[[commands]]
+name = "gamerule"
+args = "<rule> [value]"
+help = "Change a game rule: gamerule keepInventory true"
+
+[[commands]]
+name = "setworldspawn"
+args = "[x y z]"
+help = "Move the world's spawn point"
+
+[[commands]]
+name = "seed"
+help = "The world's seed"
+
+[[commands]]
+name = "save-all"
+help = "Save the world now"
+
+[[commands]]
+name = "plugins"
+help = "The plugins loaded (Paper)"
+
+[[commands]]
+name = "tps"
+help = "How fast the server keeps up (Paper; 20 is full speed)"
+
+[[commands]]
+name = "version"
+help = "The server's version"
+
+[[commands]]
+name = "stop"
+help = "Save the world and stop the server"

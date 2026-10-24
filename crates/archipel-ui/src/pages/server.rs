@@ -4,12 +4,13 @@ use archipel_core::api::{
     CommandRequest, ConsoleLines, FileView, SaveFile, ServerState, ServerView, UpdateServer,
     UserView,
 };
-use archipel_core::game::GameDef;
+use archipel_core::game::{CommandDef, GameDef};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
+use super::addons::AddonsTab;
 use super::servers::{badge_of, reach_of};
 use super::settings_form::{MemoryField, SettingsFields, defaults};
 use crate::api;
@@ -18,11 +19,11 @@ use crate::components::{
 };
 use crate::util::{desktop, is_admin, mb, polled, run, since, strip_ansi, toasts, use_me};
 
+/// The tabs every server has; one for its addons ("Plugins") goes before Delete.
 const TABS: &[(&str, &str)] = &[
     ("console", "Console"),
     ("settings", "Settings"),
     ("files", "Files"),
-    ("delete", "Delete"),
 ];
 
 #[component]
@@ -74,6 +75,22 @@ pub fn ServerPage() -> impl IntoView {
             )
         })
     };
+    let tabs = Memo::new(move |_| {
+        let mut tabs: Vec<(&'static str, String)> =
+            TABS.iter().map(|(k, l)| (*k, l.to_string())).collect();
+        if let Some(label) = game.with(|g| {
+            g.as_ref()
+                .and_then(|g| g.addons.as_ref())
+                .map(|a| a.label.clone())
+        }) {
+            tabs.push(("addons", label));
+        }
+        tabs.push(("delete", "Delete".into()));
+        tabs
+    });
+    let commands = Signal::derive(move || {
+        game.with(|g| g.as_ref().map(|g| g.commands.clone()).unwrap_or_default())
+    });
     let on_changed = Callback::new(move |s: ServerView| {
         server.data.set(Some(s));
         me.reload();
@@ -165,8 +182,7 @@ pub fn ServerPage() -> impl IntoView {
                 </Show>
 
                 <div class="tabs" role="tablist" aria-label="Server">
-                    {TABS.iter().map(|(key, label)| {
-                        let key = *key;
+                    {move || tabs.get().into_iter().map(|(key, label)| {
                         let danger = if key == "delete" { " tab-danger" } else { "" };
                         view! {
                             <button type="button" role="tab" id=format!("tab-{key}")
@@ -174,7 +190,7 @@ pub fn ServerPage() -> impl IntoView {
                                 aria-selected=move || (tab.get() == key).to_string()
                                 aria-controls="tab-panel"
                                 on:click=move |_| set_tab(key)>
-                                {*label}
+                                {label}
                             </button>
                         }
                     }).collect_view()}
@@ -198,10 +214,16 @@ pub fn ServerPage() -> impl IntoView {
                             </Show>
                         }.into_any(),
                         "files" => view! { <FilesTab id/> }.into_any(),
+                        "addons" => match game.get().and_then(|g| g.addons) {
+                            Some(def) => view! {
+                                <AddonsTab id def server=current on_tab=Callback::new(move |t: &'static str| set_tab(t))/>
+                            }.into_any(),
+                            None => view! { <Loading/> }.into_any(),
+                        },
                         "delete" => view! {
                             <DeleteTab id name=Signal::derive(field(|s| s.name.clone()))/>
                         }.into_any(),
-                        _ => view! { <ConsoleTab id server=current/> }.into_any(),
+                        _ => view! { <ConsoleTab id server=current commands/> }.into_any(),
                     }}
                 </div>
             </Show>
@@ -220,8 +242,64 @@ enum LineKind {
     Command,
 }
 
+/// Suggestions shown at most.
+const MAX_SUGGESTIONS: usize = 8;
+
+/// The commands starting with what is typed (a slash before it ignored: game
+/// consoles take none), or, once a command's arguments are being typed, that one.
+fn suggest(commands: &[CommandDef], typed: &str) -> (Vec<CommandDef>, Option<CommandDef>) {
+    let typed = typed.trim_start().trim_start_matches('/').to_lowercase();
+    if typed.is_empty() {
+        return (vec![], None);
+    }
+    let matching: Vec<CommandDef> = commands
+        .iter()
+        .filter(|c| c.name.to_lowercase().starts_with(&typed))
+        .take(MAX_SUGGESTIONS)
+        .cloned()
+        .collect();
+    let typing_args = commands
+        .iter()
+        .filter(|c| typed.starts_with(&format!("{} ", c.name.to_lowercase())))
+        .max_by_key(|c| c.name.len())
+        .cloned();
+    match typing_args {
+        Some(c) if matching.is_empty() => (vec![], Some(c)),
+        _ => (matching, None),
+    }
+}
+
+/// A line as the console takes it: without the slash of the game's chat, when it
+/// names one of the game's commands.
+fn without_slash(commands: &[CommandDef], line: &str) -> String {
+    let Some(rest) = line.strip_prefix('/') else {
+        return line.to_string();
+    };
+    let first = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    let known = commands.iter().any(|c| {
+        c.name
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.to_lowercase() == first)
+    });
+    if known {
+        rest.to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 #[component]
-fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView {
+fn ConsoleTab(
+    id: Memo<u64>,
+    server: Memo<Option<ServerView>>,
+    /// The game's commands, offered as one types.
+    commands: Signal<Vec<CommandDef>>,
+) -> impl IntoView {
     let lines = RwSignal::new(Vec::<(usize, LineKind, String)>::new());
     let counter = StoredValue::new(0usize);
     let next_key = move || {
@@ -312,18 +390,78 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
         }
     };
 
-    // The command line, with its history on the up and down arrows.
+    // The command line, with its history on the up and down arrows, and the
+    // game's commands offered as one types (Tab completes).
     let command = RwSignal::new(String::new());
     let history = StoredValue::new(Vec::<String>::new());
     let cursor = StoredValue::new(None::<usize>);
     let input = NodeRef::<leptos::html::Input>::new();
     let can_type = move || matches!(state(), ServerState::Running | ServerState::Starting);
+    // Suggestions are hidden by Escape, a history entry or a sent line, until the
+    // next key typed.
+    let dismissed = RwSignal::new(false);
+    // The suggestion picked with the arrows.
+    let picked = RwSignal::new(None::<usize>);
+    // Every command listed, while nothing is typed (Tab, or the Commands button).
+    let listing = RwSignal::new(false);
+    let suggestions = Memo::new(move |_| {
+        if dismissed.get() {
+            return (vec![], None);
+        }
+        let blank = command.with(|t| t.trim().trim_start_matches('/').is_empty());
+        if blank && listing.get() {
+            return (commands.get(), None);
+        }
+        commands.with(|c| command.with(|t| suggest(c, t)))
+    });
+    let open = move || suggestions.with(|(s, _)| !s.is_empty());
+    let show_all = move || {
+        listing.set(true);
+        dismissed.set(false);
+        picked.set(None);
+    };
+    let suggest_box = NodeRef::<leptos::html::Div>::new();
+    // The one picked with the arrows stays in sight in a long list.
+    Effect::new(move |_| {
+        use wasm_bindgen::JsCast;
+        let Some(i) = picked.get() else { return };
+        let Some(list) = suggest_box.get_untracked() else {
+            return;
+        };
+        let Ok(Some(item)) = list.query_selector(&format!("#console-suggestion-{i}")) else {
+            return;
+        };
+        let Ok(item) = item.dyn_into::<web_sys::HtmlElement>() else {
+            return;
+        };
+        let (top, height) = (item.offset_top(), item.offset_height());
+        if top < list.scroll_top() {
+            list.set_scroll_top(top);
+        } else if top + height > list.scroll_top() + list.client_height() {
+            list.set_scroll_top(top + height - list.client_height());
+        }
+    });
+    let complete = move |c: &CommandDef| {
+        command.set(if c.args.is_empty() {
+            c.name.clone()
+        } else {
+            format!("{} ", c.name)
+        });
+        picked.set(None);
+        listing.set(false);
+        if let Some(el) = input.get_untracked() {
+            let _ = el.focus();
+        }
+    };
     let send = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        let line = command.get_untracked().trim().to_string();
+        let line = commands.with_untracked(|c| without_slash(c, command.get_untracked().trim()));
         if line.is_empty() {
             return;
         }
+        dismissed.set(true);
+        picked.set(None);
+        listing.set(false);
         history.update_value(|h| {
             if h.last() != Some(&line) {
                 h.push(line.clone());
@@ -345,12 +483,62 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
         });
     };
     let on_key = move |ev: leptos::ev::KeyboardEvent| {
+        let key = ev.key();
+        if open() {
+            let count = suggestions.with_untracked(|(s, _)| s.len());
+            match key.as_str() {
+                "Tab" => {
+                    ev.prevent_default();
+                    let i = picked.get_untracked().unwrap_or(0);
+                    if let Some(c) = suggestions.with_untracked(|(s, _)| s.get(i).cloned()) {
+                        complete(&c);
+                    }
+                    return;
+                }
+                "Enter" => {
+                    if let Some(c) = picked
+                        .get_untracked()
+                        .and_then(|i| suggestions.with_untracked(|(s, _)| s.get(i).cloned()))
+                    {
+                        ev.prevent_default();
+                        complete(&c);
+                    }
+                    return;
+                }
+                "ArrowDown" => {
+                    ev.prevent_default();
+                    picked.set(Some(picked.get_untracked().map_or(0, |i| (i + 1) % count)));
+                    return;
+                }
+                "ArrowUp" if picked.get_untracked().is_some() => {
+                    ev.prevent_default();
+                    picked.set(picked.get_untracked().and_then(|i| i.checked_sub(1)));
+                    return;
+                }
+                "Escape" => {
+                    dismissed.set(true);
+                    picked.set(None);
+                    listing.set(false);
+                    return;
+                }
+                _ => {}
+            }
+        } else if key == "Tab"
+            && command.with_untracked(|t| t.trim().is_empty())
+            && commands.with_untracked(|c| !c.is_empty())
+        {
+            // Nothing typed: Tab lists every command.
+            ev.prevent_default();
+            show_all();
+            return;
+        }
         let len = history.with_value(Vec::len);
         if len == 0 {
             return;
         }
-        match ev.key().as_str() {
+        match key.as_str() {
             "ArrowUp" => {
+                dismissed.set(true);
                 ev.prevent_default();
                 let i = cursor.get_value().map_or(len - 1, |i| i.saturating_sub(1));
                 cursor.set_value(Some(i));
@@ -361,6 +549,7 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
                     return;
                 };
                 ev.prevent_default();
+                dismissed.set(true);
                 if i + 1 < len {
                     cursor.set_value(Some(i + 1));
                     command.set(history.with_value(|h| h[i + 1].clone()));
@@ -385,6 +574,21 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
                     }}
                 </span>
                 <span class="push-right">
+                    <Show when=move || commands.with(|c| !c.is_empty())>
+                        <button type="button" class="icon-button" title="Every command this game's console takes"
+                            aria-pressed=move || (listing.get() && open()).to_string()
+                            on:click=move |_| {
+                                if listing.get_untracked() && open() {
+                                    listing.set(false);
+                                } else {
+                                    command.set(String::new());
+                                    show_all();
+                                    if let Some(el) = input.get_untracked() {
+                                        let _ = el.focus();
+                                    }
+                                }
+                            }>"Commands"</button>
+                    </Show>
                     <button type="button" class="icon-button" title="Clear the console view (the server keeps its log)"
                         on:click=move |_| lines.set(vec![])>"Clear"</button>
                 </span>
@@ -409,16 +613,64 @@ fn ConsoleTab(id: Memo<u64>, server: Memo<Option<ServerView>>) -> impl IntoView 
                     to_bottom();
                 }>"↓ Latest"</button>
             </Show>
+            // While stopped, the list can still be read (from the Commands button).
+            <Show when=move || (can_type() || listing.get()) && (open() || suggestions.with(|(_, h)| h.is_some()))>
+                <div class="console-suggest" node_ref=suggest_box>
+                    <Show when=move || listing.get() && command.with(|t| t.trim().is_empty())>
+                        <div class="suggest-title">
+                            {move || format!("{} commands, typed without a slash.", commands.with(Vec::len))}
+                            {move || if can_type() {
+                                " Click one, or pick it with ↓ and Tab; typing narrows the list."
+                            } else {
+                                " Start the server to type them."
+                            }}
+                        </div>
+                    </Show>
+                    {move || suggestions.with(|(_, hint)| hint.clone()).map(|c| view! {
+                        <div class="suggest-hint" aria-live="polite">
+                            <code>{c.name.clone()}</code>" "<span class="suggest-args">{c.args.clone()}</span>
+                            <span class="suggest-help">{c.help.clone()}</span>
+                        </div>
+                    })}
+                    <ul id="console-suggestions" role="listbox" aria-label="Commands">
+                        {move || suggestions.get().0.into_iter().enumerate().map(|(i, c)| {
+                            let active = move || picked.get() == Some(i);
+                            let chosen = c.clone();
+                            view! {
+                                <li role="option" id=format!("console-suggestion-{i}")
+                                    class=move || if active() { "suggest-item active" } else { "suggest-item" }
+                                    aria-selected=move || active().to_string()
+                                    // Before the input loses focus.
+                                    on:mousedown=move |ev| {
+                                        ev.prevent_default();
+                                        complete(&chosen);
+                                    }>
+                                    <code>{c.name.clone()}</code>" "<span class="suggest-args">{c.args.clone()}</span>
+                                    <span class="suggest-help">{c.help.clone()}</span>
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                </div>
+            </Show>
             <form class="console-input" on:submit=send>
                 <span class="console-prompt" aria-hidden="true">">"</span>
                 <label for="console-command" class="visually-hidden">"Console command"</label>
                 <input type="text" id="console-command" node_ref=input bind:value=command
                     autocomplete="off" autocapitalize="off" spellcheck="false"
+                    role="combobox" aria-autocomplete="list" aria-controls="console-suggestions"
+                    aria-expanded=move || open().to_string()
+                    aria-activedescendant=move || picked.get().map(|i| format!("console-suggestion-{i}"))
                     disabled=move || !can_type() on:keydown=on_key
-                    placeholder=move || if can_type() {
-                        "Type a command and press Enter (↑ for the previous ones)"
-                    } else {
-                        "Start the server to type commands"
+                    on:input=move |_| {
+                        dismissed.set(false);
+                        picked.set(None);
+                        cursor.set_value(None);
+                    }
+                    placeholder=move || match (can_type(), commands.with(Vec::is_empty)) {
+                        (false, _) => "Start the server to type commands",
+                        (true, true) => "Type a command and press Enter (↑ for the previous ones)",
+                        (true, false) => "Type a command, no slash. Tab completes it, or lists them all; ↑ for the previous ones",
                     }/>
                 <button type="submit" class="button button-small"
                     disabled=move || !can_type() || command.with(|c| c.trim().is_empty())>"Send"</button>
@@ -596,7 +848,7 @@ fn SettingsTab(
             </fieldset>
             <fieldset class="form-section">
                 <legend>"Game settings"</legend>
-                <SettingsFields game=game.get_value() values editing=true/>
+                <SettingsFields game=game.get_value() values editing=true server=id/>
             </fieldset>
             <ErrorNote error=error/>
             <Show when=move || saved.get() && running()>
