@@ -223,6 +223,17 @@ fn unchecked(verified: Option<&Verification>) -> Option<impl IntoView + use<>> {
     v.map(|_| view! { <p class="small muted">{format!("Not checked from outside{why}.")}</p> })
 }
 
+/// What the check from outside saw where the router did not open the ports: after
+/// forwarding them by hand, whether friends get through yet.
+fn checked_by_hand(verified: Option<&Verification>) -> Option<impl IntoView + use<>> {
+    verified
+        .filter(|v| v.outside == Outside::NotReached)
+        .map(|v| {
+            let why = v.detail.clone().map(|d| format!(": {d}")).unwrap_or_default();
+            view! { <p class="small reach-detail">{format!("Friends don't get through yet{why}.")}</p> }
+        })
+}
+
 /// Why the hostname set for friends is not the address given, if it is not.
 fn host_warning(verified: Option<&Verification>) -> Option<impl IntoView + use<>> {
     verified
@@ -357,9 +368,10 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
                             {r.local.clone().map(|address| view! { <CopyAddress address/> })}
                             <p>
                                 {format!(
-                                    "To let friends in, turn on UPnP in your router's settings, or forward {forward} to this PC{this_pc}."
+                                    "To let friends in, turn on UPnP in your router's settings, or forward {forward} to this PC{this_pc}. archipel then checks from outside that friends get through."
                                 )}
                             </p>
+                            {checked_by_hand(verified)}
                             {firewall}
                             {detail}
                         </div>
@@ -376,6 +388,7 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
                                 )}
                             </p>
                             {r.local.clone().map(|address| view! { <CopyAddress address/> })}
+                            {checked_by_hand(verified)}
                             {detail}
                         </div>
                     }.into_any()
@@ -530,18 +543,22 @@ pub fn InternetCard() -> impl IntoView {
                             } else {
                                 "✓ Friends can join from the internet".to_string()
                             },
-                            format!(
-                                "Your router opens ports for archipel by itself{}{}. Each server's page gives the address to share.",
-                                i.public_ip.as_deref().map(|ip| format!(" (your public address is {ip})")).unwrap_or_default(),
-                                if checked { ", and a check from the internet got through" } else { "" },
-                            ),
+                            {
+                                let ip = i.public_ip.as_deref().map(|ip| format!(" (your public address is {ip})")).unwrap_or_default();
+                                // Forwarded by the router, or by hand: the check says either way.
+                                if checked {
+                                    format!("A check from the internet got through to this PC{ip}. Each server's page gives the address to share.")
+                                } else {
+                                    format!("Your router opens ports for archipel by itself{ip}. Each server's page gives the address to share.")
+                                }
+                            },
                         )
                     }
                     ReachState::LocalOnly => (
                         "note note-warning reach-panel",
                         "⚠ Only your home network can join".to_string(),
                         format!(
-                            "Your router did not open a port for archipel. To let friends in, turn on UPnP (or NAT-PMP) in your router's settings, or forward ports {} (TCP and UDP) to this PC{this_pc}.",
+                            "Your router did not open a port for archipel. To let friends in, turn on UPnP (or NAT-PMP) in your router's settings, or forward ports {} (TCP and UDP) to this PC{this_pc}, then check again: archipel checks from outside that friends get through.",
                             i.ports
                         ),
                     ),
@@ -561,6 +578,7 @@ pub fn InternetCard() -> impl IntoView {
                         {host}
                         {(i.state == ReachState::Internet).then(|| host_warning(verified))}
                         {(i.state == ReachState::Internet).then(|| unchecked(verified))}
+                        {(i.state != ReachState::Internet).then(|| checked_by_hand(verified))}
                         {firewall}
                         {detail}
                         <div class="internet-actions">

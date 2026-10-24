@@ -14,10 +14,12 @@
 //! stale public address keeps friends out all the same: when the router says yes,
 //! archipel asks a hosted archipel on the internet to try a spare port of the pool
 //! from outside, with an echo responder listening on it meanwhile (see
-//! [`crate::probe`]). That check runs when the app opens, on "Check again" and with
-//! every renewal, never as a server starts: one port stands for the whole pool, as
-//! the router answers for each port it refuses and the firewall's rules are read
-//! for the whole pool.
+//! [`crate::probe`]). It asks whatever the router said: ports forwarded by hand
+//! get through too, and then friends can join. That check runs when the app opens,
+//! on "Check again" and with every renewal, never as a server starts: one port
+//! stands for the whole pool, as the router answers for each port it refuses, the
+//! firewall's rules are read for the whole pool, and the whole pool is what to
+//! forward by hand.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -118,8 +120,16 @@ impl Reacher {
         }))
     }
 
+    /// Who can reach a running server: what the router did for it, unless friends
+    /// got through from outside where it would not (the pool forwarded by hand).
     pub fn status(&self, server: u64) -> Option<Status> {
-        self.servers.lock().get(&server).map(|e| e.status.clone())
+        let status = self.servers.lock().get(&server).map(|e| e.status.clone())?;
+        let machine = self.machine();
+        Some(if machine.state == ReachState::Internet {
+            by_hand(status, self.verified().as_ref(), machine.public_ip)
+        } else {
+            status
+        })
     }
 
     /// Whether this computer can receive games from the internet, as last seen.
@@ -127,7 +137,7 @@ impl Reacher {
         self.machine.lock().clone()
     }
 
-    /// What the last check from outside saw, while the router forwards.
+    /// What the last check from outside saw.
     pub fn verified(&self) -> Option<Verification> {
         self.verified.lock().clone()
     }
@@ -138,8 +148,9 @@ impl Reacher {
     }
 
     /// Finds out whether the internet can reach this computer: asks the router to
-    /// forward a port of the pool no server has, has it tried from outside, then
-    /// takes it back. Asked while a check runs, another follows.
+    /// forward a port of the pool no server has, has it tried from outside (the
+    /// router may have refused and the pool be forwarded by hand), then takes it
+    /// back. Asked while a check runs, another follows.
     pub async fn check(&self) {
         self.again.store(true, Ordering::SeqCst);
         let _one = self.check_lock.lock().await;
@@ -154,14 +165,19 @@ impl Reacher {
             None => (self.pool.0, true),
         };
         let (mut status, via) = self.assess(&[port]).await;
-        let verified = if status.state == ReachState::Internet {
+        let verified = if status.local_ip.is_some() {
             let (verified, seen) = self.echo_check(port).await;
             // The hosted archipel saw the address the internet sees.
-            if let Some(ip) = seen.filter(|ip| Some(*ip) != status.public_ip) {
+            let known = self.public_ip().await;
+            if let Some(ip) = seen.filter(|ip| Some(*ip) != known) {
                 info!(%ip, "the public address changed");
                 *self.public.lock().await = Some((Instant::now(), Some(ip)));
-                status.public_ip = Some(ip);
             }
+            let public_ip = seen.or(known);
+            if status.state == ReachState::Internet {
+                status.public_ip = public_ip;
+            }
+            status = by_hand(status, Some(&verified), public_ip);
             Some(verified)
         } else {
             None
@@ -334,11 +350,22 @@ impl Reacher {
         info!(server, ?status.state, "reachability");
         {
             let mut machine = self.machine.lock();
-            // The last check from outside stands for the same address only.
-            if status.state != ReachState::Internet || status.public_ip != machine.public_ip {
-                *self.verified.lock() = None;
+            let mut verified = self.verified.lock();
+            let reached = verified
+                .as_ref()
+                .is_some_and(|v| v.outside == Outside::Reached);
+            // Friends got through from outside where the router would not (the pool
+            // forwarded by hand): that stands until the next check.
+            if !(reached
+                && machine.state == ReachState::Internet
+                && status.state != ReachState::Internet)
+            {
+                // The last check stands for the same verdict and address only.
+                if status.state != machine.state || status.public_ip != machine.public_ip {
+                    *verified = None;
+                }
+                *machine = status.clone();
             }
-            *machine = status.clone();
         }
         if let Some(entry) = self.servers.lock().get_mut(&server) {
             entry.status = status;
@@ -407,6 +434,24 @@ impl Reacher {
         .ok();
         *cached = Some((Instant::now(), ip));
         ip
+    }
+}
+
+/// The router's verdict, unless friends got through from outside where it would
+/// not open the ports (forwarded by hand, or by a router that does not say): then
+/// they can join, at the address the internet sees.
+fn by_hand(status: Status, verified: Option<&Verification>, public_ip: Option<IpAddr>) -> Status {
+    let reached = verified.is_some_and(|v| v.outside == Outside::Reached);
+    match status.state {
+        ReachState::LocalOnly | ReachState::NoPublicAddress if reached && public_ip.is_some() => {
+            Status {
+                state: ReachState::Internet,
+                local_ip: status.local_ip,
+                public_ip,
+                detail: None,
+            }
+        }
+        _ => status,
     }
 }
 
@@ -1306,6 +1351,42 @@ mod tests {
         // The port is free again, for a game.
         tokio::net::TcpListener::bind(addr).await.unwrap();
         tokio::net::UdpSocket::bind(addr).await.unwrap();
+    }
+
+    #[test]
+    fn lets_friends_in_when_they_got_through_by_hand() {
+        let home = Ipv4Addr::new(192, 168, 1, 20);
+        let public: IpAddr = "86.245.1.2".parse().unwrap();
+        let refused = judge(false, None, home, Some(public), Some("UPnP is off".into()));
+        let seen = |outside| Verification {
+            outside,
+            detail: None,
+            host: None,
+            host_note: None,
+            checked_at: 7,
+        };
+        let s = by_hand(refused.clone(), Some(&seen(Outside::Reached)), Some(public));
+        assert_eq!(
+            (s.state, s.public_ip, s.detail),
+            (ReachState::Internet, Some(public), None)
+        );
+        for outside in [Outside::NotReached, Outside::Unavailable] {
+            assert_eq!(
+                by_hand(refused.clone(), Some(&seen(outside)), Some(public)),
+                refused
+            );
+        }
+        assert_eq!(by_hand(refused.clone(), None, Some(public)), refused);
+        // Behind the provider's NAT, yet reached: forwarded on both routers.
+        let behind = judge(
+            true,
+            Some("10.0.0.2".parse().unwrap()),
+            home,
+            Some(public),
+            None,
+        );
+        let s = by_hand(behind, Some(&seen(Outside::Reached)), Some(public));
+        assert_eq!(s.state, ReachState::Internet);
     }
 
     #[test]
