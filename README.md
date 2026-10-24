@@ -67,6 +67,15 @@ and the ports are published there. The node must run x86_64 for Urban Terror and
 | `ARCHIPEL_PUBLIC_HOST` | | the address players use; without it, the one the UI is browsed at |
 | `ARCHIPEL_RESERVE_MB` | `256` | memory kept for archipel |
 | `ARCHIPEL_ADMIN_PASSWORD` | | the first admin's password (otherwise random, in `<data>/initial-admin-password`) |
+| `ARCHIPEL_PROBE` | `off` | `on`: desktop apps may ask this archipel to check their ports from the internet |
+
+With `ARCHIPEL_PROBE=on` (`facade env set archipel ARCHIPEL_PROBE=on --public`),
+anyone may ask this archipel, without logging in, to try to reach their own
+address on one port (`POST /api/probe`, see [docs/api.md](docs/api.md)): it is what
+the desktop app's "checked from outside" asks. It only probes the caller's public
+IPv4 address, ten times per address in ten minutes, sixteen at once. The caller's
+address is the `X-Real-IP` facade's entry point sets: with a CDN or another proxy
+in front of facade, that would be the proxy's, and every probe would aim at it.
 
 ## On your own computer
 

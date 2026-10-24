@@ -34,6 +34,10 @@ pub struct Config {
     /// only (keep `--listen` on 127.0.0.1: there is no login).
     #[arg(long, env = "ARCHIPEL_DESKTOP", hide = true)]
     pub desktop: bool,
+    /// Lets desktop apps ask this archipel to check, from the internet, that their
+    /// ports reach them (`POST /api/probe`): `on` or `off`.
+    #[arg(long, env = "ARCHIPEL_PROBE", value_parser = clap::builder::BoolishValueParser::new())]
+    pub probe: bool,
 }
 
 impl Config {
@@ -55,6 +59,7 @@ impl Config {
             reserve_mb: 0,
             admin_password: None,
             desktop: true,
+            probe: false,
         }
     }
 
