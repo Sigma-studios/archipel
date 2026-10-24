@@ -62,6 +62,7 @@ fn Pages() -> impl IntoView {
                     <Route path=path!("servers/:id") view=pages::server::ServerPage/>
                     <Route path=path!("admin") view=pages::admin::Admin/>
                     <Route path=path!("account") view=pages::account::Account/>
+                    <Route path=path!("settings") view=pages::settings::SettingsPage/>
                 </ParentRoute>
             </Routes>
         </Router>
@@ -117,6 +118,9 @@ fn Shell() -> impl IntoView {
                         <li><A href="/" exact=true>"Servers"</A></li>
                         <Show when=move || is_admin(me)>
                             <li><A href="/admin">"Admin"</A></li>
+                        </Show>
+                        <Show when=desktop>
+                            <li><A href="/settings">"Settings"</A></li>
                         </Show>
                     </ul>
                     <Show when=|| !desktop()>
