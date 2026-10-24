@@ -12,6 +12,7 @@ pub mod fsops;
 pub mod games;
 pub mod hooks;
 pub mod install;
+pub mod probe;
 pub mod reach;
 pub mod sandbox;
 pub mod store;
