@@ -423,6 +423,7 @@ impl Installer {
     // ---------------------------------------------------------------- Steam
 
     /// DepotDownloader, downloaded once and shared: the path of its program.
+    /// It's self-contained .NET, but loads the system's OpenSSL at run time.
     async fn depot_downloader(&self, console: &Console) -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         let dir = self
@@ -502,7 +503,17 @@ impl Installer {
             match &last {
                 Ok(()) => break,
                 Err(e) => {
-                    console.system(format!("DepotDownloader failed (attempt {attempt}): {e:#}"))
+                    console.system(format!("DepotDownloader failed (attempt {attempt}): {e:#}"));
+                    // .NET aborts without OpenSSL ("No usable version of libssl
+                    // was found"): no point trying again, say what's missing.
+                    if find_library(&library_dirs(), OPENSSL_NAMES).is_none() {
+                        bail!(
+                            "DepotDownloader needs OpenSSL to reach Steam, and this system has \
+                             none where programs look for it (libssl.so.3 or older). Install \
+                             your system's OpenSSL package (libssl3 on Debian and Ubuntu); on \
+                             NixOS, archipel's nix/ package brings it"
+                        );
+                    }
                 }
             }
         }
@@ -890,9 +901,62 @@ struct PaperChecksums {
     sha256: String,
 }
 
+/// The OpenSSL versions .NET (DepotDownloader) can load, newest first.
+const OPENSSL_NAMES: &[&str] = &[
+    "libssl.so.3",
+    "libssl.so.1.1",
+    "libssl.so.1.0.2",
+    "libssl.so.1.0.0",
+    "libssl.so.10",
+];
+
+/// Where the dynamic loader looks for a library by name: LD_LIBRARY_PATH, the
+/// usual and Debian-style directories. Not ld.so.conf's extras, so a miss only
+/// adds an explanation to a failure, never stops anything by itself.
+fn library_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("LD_LIBRARY_PATH")
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default();
+    let multiarch = format!("{}-linux-gnu", std::env::consts::ARCH);
+    for d in ["/lib64", "/usr/lib64", "/lib", "/usr/lib"] {
+        dirs.push(PathBuf::from(d));
+        dirs.push(Path::new(d).join(&multiarch));
+    }
+    dirs
+}
+
+/// The first of `names` found in `dirs`.
+fn find_library(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
+    names
+        .iter()
+        .find_map(|n| dirs.iter().map(|d| d.join(n)).find(|p| p.exists()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_a_library_by_name() {
+        let dir = std::env::temp_dir().join(format!("archipel-libs-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let dirs = [a.clone(), b.clone()];
+        assert_eq!(find_library(&dirs, OPENSSL_NAMES), None);
+        std::fs::write(b.join("libssl.so.1.1"), "").unwrap();
+        assert_eq!(
+            find_library(&dirs, OPENSSL_NAMES),
+            Some(b.join("libssl.so.1.1"))
+        );
+        // Newer versions win, wherever they are.
+        std::fs::write(a.join("libssl.so.3"), "").unwrap();
+        assert_eq!(
+            find_library(&dirs, OPENSSL_NAMES),
+            Some(a.join("libssl.so.3"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn condenses_depot_downloader_progress() {
