@@ -144,8 +144,11 @@ point to this connection; otherwise they keep the IP address and say why.
 
 Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
 the games archipel downloads (Java, Steam's, Urban Terror) are built for usual
-distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`.
-Steam games come through DepotDownloader, a 64-bit program; Fistful of Frags's
+distributions: build [`nix/`](nix/default.nix), which runs the app in an FHS
+environment with what they need, or run the AppImage with `appimage-run`, or turn
+on `programs.nix-ld`.
+Steam games come through DepotDownloader, a 64-bit program that needs the system's
+OpenSSL (`libssl3` on Debian and Ubuntu; `nix/` includes it); Fistful of Frags's
 server is 32-bit, though, and needs 32-bit libraries (`lib32gcc-s1` and
 `lib32stdc++6` on Debian and Ubuntu), which NixOS cannot provide where it looks for
 them: it does not run there. Source servers also want `libcurl3-gnutls` and
