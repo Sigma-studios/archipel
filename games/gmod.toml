@@ -2,7 +2,7 @@
 # 64-bit branch.
 id = "gmod"
 name = "Garry's Mod"
-description = "The physics sandbox: build, or play its gamemodes (Trouble in Terrorist Town). The dedicated server comes from Steam."
+description = "The physics sandbox: build, or play its gamemodes (Trouble in Terrorist Town). The dedicated server comes from Steam (about 7 GB)."
 badge = "🧰"
 memory = { min_mb = 1024, default_mb = 2048 }
 ports = [

@@ -90,8 +90,9 @@ pub enum Install {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subdir: Option<String>,
     },
-    /// A Steam dedicated server, logged in anonymously, in each server's directory.
-    /// Updated when the server is reinstalled.
+    /// A Steam dedicated server in each server's directory, downloaded anonymously
+    /// (with DepotDownloader: the name stays from SteamCMD, used before). Updated
+    /// when the server is reinstalled.
     Steamcmd {
         app_id: u32,
         /// A branch of the app other than the default one: `x86-64`.

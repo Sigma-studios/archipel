@@ -59,7 +59,7 @@ Then log in at `https://games.example.com` as `admin`, create users and give the
 quotas. Players connect to `games.example.com:<port>`: the domain points at the node,
 and the ports are published there. The node must run x86_64 for every game but
 Minecraft. Steam games install in each server's directory: Team Fortress 2 takes
-about 12 GB, so size disk quotas for it.
+about 15 GB, Garry's Mod 7 GB, Fistful of Frags 3 GB: size disk quotas for them.
 
 * **Memory and CPU**: archipel shares out its container's limits (`--memory`,
   `--cpus`) less 256 MB for itself (`ARCHIPEL_RESERVE_MB`). A server's memory is a hard
@@ -135,11 +135,13 @@ before). You can also give a hostname for friends, such as a dynamic DNS name li
 point to this connection; otherwise they keep the IP address and say why.
 
 Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
-the games archipel downloads (Java, SteamCMD, Urban Terror) are built for usual
-distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`. SteamCMD (every Steam game) needs 32-bit libraries on
-x86_64 (`lib32gcc-s1` on Debian and Ubuntu), and so does Fistful of Frags's server
-(`lib32stdc++6`); Source servers also want `libcurl3-gnutls` and `libtinfo5`. Every
-game but Minecraft needs x86_64.
+the games archipel downloads (Java, Steam's, Urban Terror) are built for usual
+distributions: run the AppImage with `appimage-run`, or turn on `programs.nix-ld`.
+Steam games come through DepotDownloader, a 64-bit program; Fistful of Frags's
+server is 32-bit, though, and needs 32-bit libraries (`lib32gcc-s1` and
+`lib32stdc++6` on Debian and Ubuntu), which NixOS cannot provide where it looks for
+them: it does not run there. Source servers also want `libcurl3-gnutls` and
+`libtinfo5`. Every game but Minecraft needs x86_64.
 
 ## How servers are kept apart
 
@@ -216,8 +218,9 @@ help = "Throw a player out"
 ```
 
 Installs are `minecraft`, `shared` (an archive downloaded once, read-only for every
-server: `{base}`) or `steamcmd` (`app_id`, and `beta` for a branch of it, anonymous
-login, in each server's directory). Templates use `{port.<name>}`, `{setting.<key>}`, `{memory_mb}`,
+server: `{base}`) or `steamcmd` (a Steam app: `app_id`, and `beta` for a branch of
+it, downloaded anonymously with [DepotDownloader](https://github.com/SteamRE/DepotDownloader)
+into each server's directory). Templates use `{port.<name>}`, `{setting.<key>}`, `{memory_mb}`,
 `{java_memory_mb}`, `{dir}`, `{base}` and `{java}`; a value that is a single
 placeholder keeps its type in JSON. See [`games/`](games/) for complete examples.
 

@@ -1,6 +1,6 @@
 # archipel's image: the web UI (WebAssembly) and the server that embeds it, on a
-# slim Debian with what game servers need (SteamCMD and Fistful of Frags want
-# 32-bit libraries, Source servers libcurl and libtinfo).
+# slim Debian with what game servers need (Fistful of Frags wants 32-bit
+# libraries, Source servers libcurl and libtinfo).
 
 FROM rust:1-bookworm AS build
 ARG TRUNK_VERSION=0.21.14
