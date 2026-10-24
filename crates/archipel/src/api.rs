@@ -515,12 +515,24 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
             None,
         ),
         Some(reacher) => match reacher.status(row.id) {
-            None => (
-                connect_at(
-                    crate::reach::local_ip().map_or("localhost".into(), |ip| ip.to_string()),
-                ),
-                None,
-            ),
+            // Not running: the address friends will use once it runs.
+            None => {
+                let machine = reacher.machine();
+                let verified = reacher.verified();
+                let hostname = crate::reach::settings(&app.store)
+                    .map(|s| s.public_host)
+                    .unwrap_or_default();
+                let blocked = verified
+                    .as_ref()
+                    .is_some_and(|v| v.outside == Outside::NotReached);
+                let host = match machine.public_ip {
+                    Some(ip) if machine.state == ReachState::Internet && !blocked => {
+                        crate::reach::public_host(ip, &hostname, verified.as_ref())
+                    }
+                    _ => crate::reach::local_ip().map_or("localhost".into(), |ip| ip.to_string()),
+                };
+                (connect_at(host), None)
+            }
             Some(status) => {
                 // This computer's last check from outside stands for its servers.
                 let verified = reacher

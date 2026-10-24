@@ -507,8 +507,26 @@ pub fn InternetCard() -> impl IntoView {
                     i.detail.clone()
                 };
                 let detail = detail.map(|d| view! { <div class="small reach-detail">{d}</div> });
-                let host = verified.and_then(|v| v.host.clone()).filter(|h| h.matches).map(|h| view! {
-                    <p>"Friends can use " <strong>{h.name}</strong> " as this PC's address."</p>
+                // The address to share, and the one it leads to now, side by side.
+                let addresses = (i.state == ReachState::Internet && !not_reached).then(|| {
+                    let name = verified.and_then(|v| v.host.clone()).filter(|h| h.matches).map(|h| h.name);
+                    let ip = i.public_ip.clone();
+                    let now = "Your connection's public address right now: your provider may change it, and archipel checks again every 20 minutes.";
+                    view! {
+                        <div class="internet-addresses">
+                            {match (name, ip) {
+                                (Some(name), ip) => view! {
+                                    <CopyAddress address=name/>
+                                    {ip.map(|ip| view! { <span class="small" title=now>{format!("→ {ip} right now")}</span> })}
+                                }.into_any(),
+                                (None, Some(ip)) => view! {
+                                    <CopyAddress address=ip/>
+                                    <span class="small" title=now>"your address right now"</span>
+                                }.into_any(),
+                                (None, None) => ().into_any(),
+                            }}
+                        </div>
+                    }
                 });
                 let firewall = i
                     .firewall
@@ -543,14 +561,11 @@ pub fn InternetCard() -> impl IntoView {
                             } else {
                                 "✓ Friends can join from the internet".to_string()
                             },
-                            {
-                                let ip = i.public_ip.as_deref().map(|ip| format!(" (your public address is {ip})")).unwrap_or_default();
-                                // Forwarded by the router, or by hand: the check says either way.
-                                if checked {
-                                    format!("A check from the internet got through to this PC{ip}. Each server's page gives the address to share.")
-                                } else {
-                                    format!("Your router opens ports for archipel by itself{ip}. Each server's page gives the address to share.")
-                                }
+                            // Forwarded by the router, or by hand: the check says either way.
+                            if checked {
+                                "A check from the internet got through to this PC. Friends add a server's port to this address:".to_string()
+                            } else {
+                                "Your router opens ports for archipel by itself. Friends add a server's port to this address:".to_string()
                             },
                         )
                     }
@@ -575,7 +590,7 @@ pub fn InternetCard() -> impl IntoView {
                             {title}
                         </strong>
                         <p>{body}</p>
-                        {host}
+                        {addresses}
                         {(i.state == ReachState::Internet).then(|| host_warning(verified))}
                         {(i.state == ReachState::Internet).then(|| unchecked(verified))}
                         {(i.state != ReachState::Internet).then(|| checked_by_hand(verified))}
