@@ -9,19 +9,33 @@
 //! router did not do it); or no one outside can, whatever the router does, because
 //! the connection has no public address of its own (carrier-grade NAT, or a second
 //! router in front). The server runs in every case.
+//!
+//! A router may accept a forwarding and not honour it, and a firewall here or a
+//! stale public address keeps friends out all the same: when the router says yes,
+//! archipel asks a hosted archipel on the internet to try a spare port of the pool
+//! from outside, with an echo responder listening on it meanwhile (see
+//! [`crate::probe`]). That check runs when the app opens, on "Check again" and with
+//! every renewal, never as a server starts: one port stands for the whole pool, as
+//! the router answers for each port it refuses and the firewall's rules are read
+//! for the whole pool.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use archipel_core::api::{ReachState, Settings};
+use archipel_core::api::{
+    HostCheck, Outside, ProbeOutcome, ProbeRequest, ProbeResponse, ReachState, Settings,
+    Verification,
+};
 use archipel_core::game::Protocol;
 use igd_next::PortMappingProtocol;
 use igd_next::aio::Gateway;
 use igd_next::aio::tokio::Tokio;
 use parking_lot::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 use crate::store::Store;
@@ -36,6 +50,9 @@ const RENEW_EVERY: Duration = Duration::from_secs(20 * 60);
 const PUBLIC_FOR: Duration = Duration::from_secs(10 * 60);
 /// Asked for the address the internet sees this computer at.
 const WHAT_IS_MY_IP: &str = "https://api.ipify.org";
+/// How long the hosted archipel is given to check from outside (it takes 5 s at
+/// most).
+const PROBE_WAIT: Duration = Duration::from_secs(10);
 
 /// What archipel knows of a server's reachability.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,12 +84,20 @@ pub struct Reacher {
     servers: Mutex<HashMap<u64, Entry>>,
     /// The computer's, from the last check or server start.
     machine: Mutex<Status>,
+    /// The last check from outside, while the computer's state is `Internet`.
+    verified: Mutex<Option<Verification>>,
     check_lock: tokio::sync::Mutex<()>,
+    /// A check was asked for since the last one started.
+    again: AtomicBool,
     public: tokio::sync::Mutex<Option<(Instant, Option<IpAddr>)>>,
+    /// Servers' ports and the settings.
+    store: Arc<Store>,
+    /// The port pool, first and last.
+    pool: (u16, u16),
 }
 
 impl Reacher {
-    pub fn new() -> anyhow::Result<Arc<Self>> {
+    pub fn new(store: Arc<Store>, pool: (u16, u16)) -> anyhow::Result<Arc<Self>> {
         Ok(Arc::new(Reacher {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -84,8 +109,12 @@ impl Reacher {
                 public_ip: None,
                 detail: None,
             }),
+            verified: Default::default(),
             check_lock: Default::default(),
+            again: AtomicBool::new(false),
             public: Default::default(),
+            store,
+            pool,
         }))
     }
 
@@ -98,24 +127,161 @@ impl Reacher {
         self.machine.lock().clone()
     }
 
+    /// What the last check from outside saw, while the router forwards.
+    pub fn verified(&self) -> Option<Verification> {
+        self.verified.lock().clone()
+    }
+
     /// Says a check is coming, before it starts in the background.
     pub fn checking(&self) {
         self.machine.lock().state = ReachState::Checking;
     }
 
     /// Finds out whether the internet can reach this computer: asks the router to
-    /// forward `port` (one no server uses), then takes it back unless `keep`.
-    pub async fn check(&self, port: u16, keep: bool) {
-        let Ok(_one) = self.check_lock.try_lock() else {
+    /// forward a port of the pool no server has, has it tried from outside, then
+    /// takes it back. Asked while a check runs, another follows.
+    pub async fn check(&self) {
+        self.again.store(true, Ordering::SeqCst);
+        let _one = self.check_lock.lock().await;
+        if !self.again.swap(false, Ordering::SeqCst) {
+            // One that started after this was asked has just run.
             return;
-        };
+        }
         *self.public.lock().await = None;
-        let (status, via) = self.assess(&[port]).await;
-        info!(?status.state, detail = ?status.detail, "this computer's reachability");
+        // Every port is a server's: one stays forwarded for it.
+        let (port, keep) = match self.spare_port() {
+            Some(port) => (port, false),
+            None => (self.pool.0, true),
+        };
+        let (mut status, via) = self.assess(&[port]).await;
+        let verified = if status.state == ReachState::Internet {
+            let (verified, seen) = self.echo_check(port).await;
+            // The hosted archipel saw the address the internet sees.
+            if let Some(ip) = seen.filter(|ip| Some(*ip) != status.public_ip) {
+                info!(%ip, "the public address changed");
+                *self.public.lock().await = Some((Instant::now(), Some(ip)));
+                status.public_ip = Some(ip);
+            }
+            Some(verified)
+        } else {
+            None
+        };
+        info!(
+            ?status.state,
+            detail = ?status.detail,
+            outside = ?verified.as_ref().map(|v| (v.outside, &v.detail)),
+            "this computer's reachability"
+        );
         if let (Some(via), false) = (&via, keep) {
             withdraw(via, &[port]).await;
         }
+        if status.state == ReachState::Internet {
+            // Running servers' addresses follow a new public address.
+            for entry in self.servers.lock().values_mut() {
+                if entry.status.state == ReachState::Internet {
+                    entry.status.public_ip = status.public_ip;
+                }
+            }
+        }
+        *self.verified.lock() = verified;
         *self.machine.lock() = status;
+    }
+
+    /// A port of the pool no server has: the last one.
+    fn spare_port(&self) -> Option<u16> {
+        let taken: std::collections::HashSet<u16> = self
+            .store
+            .list_servers()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|r| r.ports.values().copied())
+            .collect();
+        (self.pool.0..=self.pool.1)
+            .rev()
+            .find(|p| !taken.contains(p))
+    }
+
+    /// Has the hosted archipel try `port`, forwarded already, from outside, with an
+    /// echo responder on it meanwhile; and says the address it saw.
+    async fn echo_check(&self, port: u16) -> (Verification, Option<IpAddr>) {
+        use rand::distr::SampleString;
+        let now = archipel_core::now();
+        let settings = settings(&self.store).unwrap_or_else(|e| {
+            debug!("reading the settings: {e:#}");
+            Settings {
+                probe_url: DEFAULT_PROBE_URL.into(),
+                default_probe_url: DEFAULT_PROBE_URL.into(),
+                public_host: String::new(),
+            }
+        });
+        let unchecked = |outside, detail: String| Verification {
+            outside,
+            detail: Some(detail),
+            host: None,
+            host_note: None,
+            checked_at: now,
+        };
+        if settings.probe_url.is_empty() {
+            let off = "checking from outside is off in the settings".into();
+            return (unchecked(Outside::Unavailable, off), None);
+        }
+        let nonce = rand::distr::Alphanumeric.sample_string(&mut rand::rng(), 32);
+        let responder = match Responder::bind((Ipv4Addr::UNSPECIFIED, port).into(), &nonce).await {
+            Ok(responder) => responder,
+            Err(e) => {
+                let taken = format!("port {port}, to check on, is in use ({e})");
+                return (unchecked(Outside::Unverifiable, taken), None);
+            }
+        };
+        let request = ProbeRequest {
+            port,
+            nonce,
+            host: Some(settings.public_host).filter(|h| !h.is_empty()),
+        };
+        let answer = self.ask(&settings.probe_url, &request).await;
+        drop(responder);
+        let seen = answer
+            .as_ref()
+            .ok()
+            .and_then(|a| a.ip.parse::<IpAddr>().ok())
+            .filter(IpAddr::is_ipv4);
+        (verification(answer, port, now), seen)
+    }
+
+    /// Asks the hosted archipel at `url` to check from outside.
+    async fn ask(&self, url: &str, request: &ProbeRequest) -> Result<ProbeResponse, String> {
+        use reqwest::StatusCode;
+        let response = self
+            .http
+            .post(format!("{url}/api/probe"))
+            .json(request)
+            .timeout(PROBE_WAIT)
+            .send()
+            .await
+            .map_err(|e| {
+                debug!("asking {url} to check from outside: {e:#}");
+                format!("{url} could not be reached")
+            })?;
+        match response.status() {
+            s if s.is_success() => response
+                .json()
+                .await
+                .map_err(|e| format!("{url} answered something unexpected ({e})")),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => {
+                Err(format!("{url} does not check from outside"))
+            }
+            StatusCode::TOO_MANY_REQUESTS => Err(format!(
+                "{url} was asked too often: it will check at the next renewal"
+            )),
+            s => {
+                let why = response
+                    .json::<archipel_core::api::ErrorBody>()
+                    .await
+                    .map(|b| format!(": {}", b.error))
+                    .unwrap_or_default();
+                Err(format!("{url} answered {s}{why}"))
+            }
+        }
     }
 
     /// Forwards `ports` if the router will, and says who can reach them.
@@ -166,7 +332,14 @@ impl Reacher {
         );
         let (status, via) = self.assess(&ports).await;
         info!(server, ?status.state, "reachability");
-        *self.machine.lock() = status.clone();
+        {
+            let mut machine = self.machine.lock();
+            // The last check from outside stands for the same address only.
+            if status.state != ReachState::Internet || status.public_ip != machine.public_ip {
+                *self.verified.lock() = None;
+            }
+            *machine = status.clone();
+        }
         if let Some(entry) = self.servers.lock().get_mut(&server) {
             entry.status = status;
             entry.via = via;
@@ -196,7 +369,9 @@ impl Reacher {
         }
     }
 
-    /// Renews forwardings before the router forgets them.
+    /// Renews forwardings before the router forgets them, and checks again: a new
+    /// public address, or a router that lost its forwardings, shows while servers
+    /// run (on a spare port: theirs are left alone).
     pub async fn renew(self: Arc<Self>) {
         loop {
             tokio::time::sleep(RENEW_EVERY).await;
@@ -211,6 +386,7 @@ impl Reacher {
                     debug!("renewing a forwarding: {e:#}");
                 }
             }
+            self.check().await;
         }
     }
 
@@ -231,6 +407,170 @@ impl Reacher {
         .ok();
         *cached = Some((Instant::now(), ip));
         ip
+    }
+}
+
+/// What a hosted archipel's answer says of this computer, checked on `port`.
+fn verification(answer: Result<ProbeResponse, String>, port: u16, now: u64) -> Verification {
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(why) => {
+            return Verification {
+                outside: Outside::Unavailable,
+                detail: Some(why),
+                host: None,
+                host_note: None,
+                checked_at: now,
+            };
+        }
+    };
+    use ProbeOutcome::*;
+    let (outside, detail) = match (answer.tcp, answer.udp) {
+        (Reached, Reached) => (Outside::Reached, None),
+        (Unsupported, _) | (_, Unsupported) => (
+            Outside::Unverifiable,
+            Some(
+                answer
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "this address can't be checked".into()),
+            ),
+        ),
+        (tcp, udp) => (Outside::NotReached, Some(failures(tcp, udp, port))),
+    };
+    let host_note = answer.host.as_ref().and_then(|h| host_note(h, &answer.ip));
+    Verification {
+        outside,
+        detail,
+        host: answer.host,
+        host_note,
+        checked_at: now,
+    }
+}
+
+/// What went wrong on each protocol, in a few words.
+fn failures(tcp: ProbeOutcome, udp: ProbeOutcome, port: u16) -> String {
+    let say = |protocols: &str, outcome| match outcome {
+        ProbeOutcome::Silent => Some(format!(
+            "nothing answered on {protocols} {port} from outside"
+        )),
+        ProbeOutcome::Refused => Some(format!("the check was refused on {protocols} {port}")),
+        ProbeOutcome::WrongAnswer => Some(format!(
+            "something other than archipel answered on {protocols} {port}"
+        )),
+        ProbeOutcome::Reached | ProbeOutcome::Unsupported => None,
+    };
+    if tcp == udp {
+        return say("TCP and UDP", tcp).unwrap_or_default();
+    }
+    // Neither is unsupported here: one that says nothing got through.
+    match (say("TCP", tcp), say("UDP", udp)) {
+        (Some(t), Some(u)) => format!("{t}; {u}"),
+        (Some(t), None) => format!("{t} (UDP got through)"),
+        (None, Some(u)) => format!("{u} (TCP got through)"),
+        (None, None) => String::new(),
+    }
+}
+
+/// Why the hostname set for friends is not given out, when it does not lead here.
+fn host_note(host: &HostCheck, ip: &str) -> Option<String> {
+    if host.matches {
+        None
+    } else if host.addresses.is_empty() {
+        Some(format!(
+            "{} doesn't exist, or has no IPv4 address",
+            host.name
+        ))
+    } else {
+        Some(format!(
+            "{} points to {}, but your address is {ip}: it hasn't been updated",
+            host.name,
+            host.addresses.join(", ")
+        ))
+    }
+}
+
+/// The host friends connect to from anywhere: the hostname set for them once the
+/// last check saw it lead to this connection, the public address otherwise.
+pub fn public_host(ip: IpAddr, hostname: &str, verified: Option<&Verification>) -> String {
+    let leads_here = verified
+        .and_then(|v| v.host.as_ref())
+        .is_some_and(|h| h.matches && h.name == hostname);
+    match ip {
+        _ if leads_here && !hostname.is_empty() => hostname.to_string(),
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    }
+}
+
+/// archipel's echo responder: answers `archipel-probe <nonce>` with the same line
+/// on a port, TCP and UDP, until dropped.
+pub struct Responder {
+    port: u16,
+    tasks: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl Responder {
+    /// Listens on `addr` (port 0: any, the same for TCP and UDP).
+    pub async fn bind(addr: SocketAddr, nonce: &str) -> std::io::Result<Self> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listener.local_addr()?;
+        let socket = tokio::net::UdpSocket::bind(addr).await?;
+        let want = crate::probe::payload(nonce);
+        let line = want.clone();
+        let tcp = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let line = line.clone();
+                tokio::spawn(tokio::time::timeout(crate::probe::TIMEOUT, async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 128];
+                    while got.len() < line.len() && !got.contains(&b'\n') {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    if got == line.as_bytes() {
+                        let _ = stream.write_all(&got).await;
+                    }
+                }));
+            }
+        });
+        let udp = tokio::spawn(async move {
+            let mut buf = [0u8; 128];
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((n, from)) if &buf[..n] == want.as_bytes() => {
+                        let _ = socket.send_to(&buf[..n], from).await;
+                    }
+                    Ok(_) => {}
+                    // What an earlier answer's ICMP error leaves behind.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::ConnectionReset
+                        ) => {}
+                    Err(_) => return,
+                }
+            }
+        });
+        Ok(Responder {
+            port: addr.port(),
+            tasks: [tcp, udp],
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for Responder {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -944,6 +1284,120 @@ impl Saved {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn echoes_the_probe_until_dropped() {
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let responder = Responder::bind("127.0.0.1:0".parse().unwrap(), nonce)
+            .await
+            .unwrap();
+        let addr: SocketAddr = (Ipv4Addr::LOCALHOST, responder.port()).into();
+        assert_eq!(
+            crate::probe::echo(addr, nonce).await,
+            (ProbeOutcome::Reached, ProbeOutcome::Reached)
+        );
+        // Anything else gets no echo.
+        assert_eq!(
+            crate::probe::echo(addr, "fedcba9876543210").await,
+            (ProbeOutcome::WrongAnswer, ProbeOutcome::Silent)
+        );
+        drop(responder);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The port is free again, for a game.
+        tokio::net::TcpListener::bind(addr).await.unwrap();
+        tokio::net::UdpSocket::bind(addr).await.unwrap();
+    }
+
+    #[test]
+    fn reads_what_was_seen_from_outside() {
+        let answer = |tcp, udp, host: Option<HostCheck>| ProbeResponse {
+            ip: "86.245.1.2".into(),
+            tcp,
+            udp,
+            detail: None,
+            host,
+        };
+        use ProbeOutcome::*;
+        let v = verification(Ok(answer(Reached, Reached, None)), 30019, 7);
+        assert_eq!(
+            (v.outside, v.detail, v.checked_at),
+            (Outside::Reached, None, 7)
+        );
+        let v = verification(Ok(answer(Reached, Silent, None)), 30019, 7);
+        assert_eq!(v.outside, Outside::NotReached);
+        assert_eq!(
+            v.detail.as_deref(),
+            Some("nothing answered on UDP 30019 from outside (TCP got through)")
+        );
+        let v = verification(Ok(answer(Refused, Refused, None)), 30019, 7);
+        assert_eq!(
+            v.detail.as_deref(),
+            Some("the check was refused on TCP and UDP 30019")
+        );
+        let v = verification(Ok(answer(WrongAnswer, Silent, None)), 30019, 7);
+        assert_eq!(
+            v.detail.as_deref(),
+            Some(
+                "something other than archipel answered on TCP 30019; nothing answered on UDP \
+                 30019 from outside"
+            )
+        );
+        let mut v6 = answer(Unsupported, Unsupported, None);
+        v6.detail = Some("IPv6 isn't checked yet".into());
+        let v = verification(Ok(v6), 30019, 7);
+        assert_eq!(
+            (v.outside, v.detail.as_deref()),
+            (Outside::Unverifiable, Some("IPv6 isn't checked yet"))
+        );
+        let v = verification(Err("https://x could not be reached".into()), 30019, 7);
+        assert_eq!(v.outside, Outside::Unavailable);
+    }
+
+    #[test]
+    fn gives_the_hostname_only_when_it_leads_here() {
+        let ip: IpAddr = "86.245.1.2".parse().unwrap();
+        let checked = |addresses: &[&str]| {
+            let host = HostCheck {
+                name: "sigma-dev.ddns.net".into(),
+                addresses: addresses.iter().map(|a| a.to_string()).collect(),
+                matches: addresses.contains(&"86.245.1.2"),
+            };
+            let answer = ProbeResponse {
+                ip: ip.to_string(),
+                tcp: ProbeOutcome::Reached,
+                udp: ProbeOutcome::Reached,
+                detail: None,
+                host: Some(host),
+            };
+            verification(Ok(answer), 30019, 7)
+        };
+        let host = "sigma-dev.ddns.net";
+        let good = checked(&["86.245.1.2"]);
+        assert_eq!(good.host_note, None);
+        assert_eq!(public_host(ip, host, Some(&good)), host);
+        // Another name than the one checked, or none set.
+        assert_eq!(public_host(ip, "other.ddns.net", Some(&good)), "86.245.1.2");
+        assert_eq!(public_host(ip, "", Some(&good)), "86.245.1.2");
+        let stale = checked(&["90.1.2.3"]);
+        assert_eq!(public_host(ip, host, Some(&stale)), "86.245.1.2");
+        assert_eq!(
+            stale.host_note.as_deref(),
+            Some(
+                "sigma-dev.ddns.net points to 90.1.2.3, but your address is 86.245.1.2: it hasn't been updated"
+            )
+        );
+        let missing = checked(&[]);
+        assert_eq!(
+            missing.host_note.as_deref(),
+            Some("sigma-dev.ddns.net doesn't exist, or has no IPv4 address")
+        );
+        // Not checked: never an unverified name.
+        assert_eq!(public_host(ip, host, None), "86.245.1.2");
+        assert_eq!(
+            public_host("2a01:e0a::1".parse().unwrap(), "", None),
+            "[2a01:e0a::1]"
+        );
+    }
 
     #[test]
     fn saves_only_valid_settings() {

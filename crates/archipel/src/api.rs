@@ -522,15 +522,19 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
                 None,
             ),
             Some(status) => {
+                // This computer's last check from outside stands for its servers.
+                let verified = reacher
+                    .verified()
+                    .filter(|_| status.state == ReachState::Internet);
+                let hostname = crate::reach::settings(&app.store)
+                    .map(|s| s.public_host)
+                    .unwrap_or_default();
                 let local = status.local_ip.and_then(|ip| connect_at(ip.to_string()));
                 let public = status
                     .public_ip
                     .filter(|_| status.state == ReachState::Internet)
                     .and_then(|ip| {
-                        connect_at(match ip {
-                            std::net::IpAddr::V4(ip) => ip.to_string(),
-                            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
-                        })
+                        connect_at(crate::reach::public_host(ip, &hostname, verified.as_ref()))
                     });
                 let forward = match (status.state, game) {
                     (ReachState::LocalOnly, Some(g)) => g
@@ -555,12 +559,8 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
                         public,
                         forward,
                         detail: status.detail,
-                        firewall: app
-                            .cfg
-                            .port_range()
-                            .ok()
-                            .and_then(|(first, last)| crate::reach::firewall_hint(first, last)),
-                        verified: None,
+                        firewall: firewall(&app.cfg, verified.as_ref()),
+                        verified,
                     }),
                 )
             }
@@ -983,6 +983,9 @@ async fn internet(State(app): S, _: Caller) -> ApiResult<Json<Internet>> {
         .reacher()
         .ok_or_else(|| not_found("only the desktop app opens ports on a router"))?;
     let status = reacher.machine();
+    let verified = reacher
+        .verified()
+        .filter(|_| status.state == ReachState::Internet);
     let (first, last) = app.cfg.port_range()?;
     Ok(Json(Internet {
         state: status.state,
@@ -990,9 +993,19 @@ async fn internet(State(app): S, _: Caller) -> ApiResult<Json<Internet>> {
         public_ip: status.public_ip.map(|ip| ip.to_string()),
         ports: format!("{first}-{last}"),
         detail: status.detail,
-        firewall: crate::reach::firewall_hint(first, last),
-        verified: None,
+        firewall: firewall(&app.cfg, verified.as_ref()),
+        verified,
     }))
+}
+
+/// A firewall here that may turn players away, unless a check from outside just
+/// got through it.
+fn firewall(cfg: &Config, verified: Option<&Verification>) -> Option<String> {
+    if verified.is_some_and(|v| v.outside == Outside::Reached) {
+        return None;
+    }
+    let (first, last) = cfg.port_range().ok()?;
+    crate::reach::firewall_hint(first, last)
 }
 
 async fn check_internet(State(app): S, caller: Caller) -> ApiResult<Json<Internet>> {
