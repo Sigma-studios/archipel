@@ -130,7 +130,7 @@ impl Supervisor {
         std::fs::create_dir_all(cfg.logs_dir())?;
         let reacher = match cfg.mode() {
             Mode::Desktop => {
-                let reacher = Reacher::new()?;
+                let reacher = Reacher::new(store.clone(), cfg.port_range()?)?;
                 tokio::spawn(reacher.clone().renew());
                 Some(reacher)
             }
@@ -268,24 +268,8 @@ impl Supervisor {
         let Some(reacher) = self.0.reacher.clone() else {
             return;
         };
-        let Ok((first, last)) = self.0.cfg.port_range() else {
-            return;
-        };
-        let taken: std::collections::HashSet<u16> = self
-            .0
-            .store
-            .list_servers()
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|r| r.ports.values().copied())
-            .collect();
-        // A server's port stays forwarded for it.
-        let (port, keep) = match (first..=last).rev().find(|p| !taken.contains(p)) {
-            Some(port) => (port, false),
-            None => (first, true),
-        };
         reacher.checking();
-        tokio::spawn(async move { reacher.check(port, keep).await });
+        tokio::spawn(async move { reacher.check().await });
     }
 
     /// Whether the owner's quota and the machine leave room for the server.
