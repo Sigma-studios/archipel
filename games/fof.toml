@@ -1,0 +1,211 @@
+# Fistful of Frags: a free western shooter on the Source engine, its dedicated
+# server from Steam (32-bit only).
+id = "fof"
+name = "Fistful of Frags"
+description = "A free western shooter on the Source engine: duels, teamplay and break bad. The dedicated server comes from Steam."
+badge = "🤠"
+memory = { min_mb = 512, default_mb = 1024 }
+ports = [
+  { name = "game", protocol = "udp", label = "Game" },
+  { name = "client", protocol = "udp", label = "Client (outgoing)" },
+]
+install = { kind = "steamcmd", app_id = 295230 }
+connect = "connect {host}:{port.game}"
+
+# Maps of one's own: .bsp files in fof/maps, next to the game's.
+[addons]
+label = "Maps"
+dir = "fof/maps"
+extensions = ["bsp"]
+help = "The game's maps are here too. Add your own .bsp files: they can be picked as the first map, or changed to with changelevel. Players who lack one download it from the server as they join (64 MB at most)."
+
+[run]
+# srcds_run restarts the server when it crashes, unless -norestart: archipel does.
+command = [
+  "./srcds_run",
+  "-game", "fof",
+  "-console",
+  "-norestart",
+  "-strictportbind",
+  "-port", "{port.game}",
+  "+clientport", "{port.client}",
+  "+maxplayers", "{setting.max_players}",
+  "+map", "{setting.map}",
+  "+sv_setsteamaccount", "{setting.token}",
+  "+servercfgfile", "archipel.cfg",
+]
+stop_command = "quit"
+stop_timeout_secs = 20
+ready = "Connection to Steam servers successful"
+
+[[settings]]
+key = "hostname"
+label = "Server name"
+type = "text"
+default = "An archipel server"
+max_len = 64
+
+[[settings]]
+key = "max_players"
+label = "Players"
+type = "number"
+default = 16
+min = 2
+max = 32
+
+[[settings]]
+key = "password"
+label = "Password to join"
+help = "Empty: anyone can join."
+type = "secret"
+
+[[settings]]
+key = "token"
+label = "Steam game server token"
+help = "Optional. Steam lists servers that have one higher; make one for app 265630 on the page linked."
+link = "https://steamcommunity.com/dev/managegameservers"
+type = "secret"
+
+[[settings]]
+key = "map"
+label = "First map"
+help = "The map's prefix is its mode: tp_ teamplay, fofhr_ break bad, vs_ versus, cm_ courses; fof_ is everyone for themselves. The next maps come from the map cycle (Files tab)."
+type = "choice"
+default = "fof_fistful"
+options_from = "maps"
+options = [
+  { value = "fof_fistful", label = "Fistful" },
+  { value = "fof_depot", label = "Depot" },
+  { value = "fof_cripplecreek", label = "Cripple Creek" },
+  { value = "fof_desperados", label = "Desperados" },
+  { value = "fof_impact", label = "Impact" },
+  { value = "fof_nest", label = "Nest" },
+  { value = "fof_overtop", label = "Overtop" },
+  { value = "fof_revenge", label = "Revenge" },
+  { value = "fof_robertlee", label = "Robert E. Lee steamboat" },
+  { value = "fof_sawmill", label = "Sawmill" },
+  { value = "fof_sweetwater", label = "Sweetwater" },
+  { value = "fof_tortuga", label = "Tortuga" },
+  { value = "fof_tramonto", label = "Tramonto" },
+  { value = "fof_winterlong", label = "Winterlong" },
+  { value = "tp_abandonded", label = "Abandonded (teamplay)" },
+  { value = "tp_assault", label = "Assault (teamplay)" },
+  { value = "tp_coastal", label = "Coastal (teamplay)" },
+  { value = "tp_eliminator", label = "Eliminator (teamplay)" },
+  { value = "tp_forest", label = "Forest (teamplay)" },
+  { value = "tp_loothill", label = "Loot Hill (teamplay)" },
+  { value = "tp_riobravo", label = "Rio Bravo (teamplay)" },
+  { value = "tp_snowy", label = "Snowy (teamplay)" },
+  { value = "tp_station", label = "Station (teamplay)" },
+  { value = "tp_yosemite", label = "Yosemite (teamplay)" },
+  { value = "fofhr_coldblood", label = "Cold Blood (break bad)" },
+  { value = "fofhr_monumentvalley", label = "Monument Valley (break bad)" },
+  { value = "fofhr_tramonto", label = "Tramonto (break bad)" },
+  { value = "vs_desert", label = "Desert (versus)" },
+  { value = "vs_forest", label = "Forest (versus)" },
+  { value = "vs_river", label = "River (versus)" },
+  { value = "cm_forest", label = "Forest (course)" },
+  { value = "cm_laststand", label = "Last Stand (course)" },
+  { value = "cm_weapon_course", label = "Weapon course (course)" },
+]
+
+[[files]]
+path = "fof/cfg/archipel.cfg"
+format = "text"
+content = """
+// Written by archipel at each start, from the server's settings, and run at
+// every map change. Your own settings go in server.cfg, read first.
+sv_allowdownload 1
+net_maxfilesize 64
+exec server.cfg
+hostname "{setting.hostname}"
+sv_password "{setting.password}"
+"""
+
+[[files]]
+path = "fof/cfg/server.cfg"
+label = "Your settings (server.cfg)"
+format = "text"
+editable = true
+initial = """
+// Your server's own settings, run at every map change before the ones from
+// its settings page.
+mp_timelimit 20\nmp_friendlyfire 0\n"""
+
+[[files]]
+path = "fof/cfg/mapcycle.txt"
+label = "Map cycle"
+format = "text"
+editable = true
+initial = """
+fof_fistful
+fof_depot
+fof_desperados
+fof_cripplecreek
+fof_revenge
+fof_robertlee
+fof_tortuga
+fof_overtop
+"""
+
+# Typed into the server's console, without a slash.
+[[commands]]
+name = "status"
+help = "Who is connected, with their user ids"
+
+[[commands]]
+name = "changelevel"
+args = "<map>"
+help = "Change the map now"
+
+[[commands]]
+name = "say"
+args = "<message>"
+help = "Talk to every player"
+
+[[commands]]
+name = "kick"
+args = "<name>"
+help = "Throw a player out"
+
+[[commands]]
+name = "kickid"
+args = "<userid> [reason]"
+help = "Throw a player out by the id status shows"
+
+[[commands]]
+name = "banid"
+args = "<minutes> <userid> kick"
+help = "Ban a player (0 minutes: for good) and throw them out"
+
+[[commands]]
+name = "writeid"
+help = "Save the bans made with banid"
+
+[[commands]]
+name = "mp_timelimit"
+args = "<minutes>"
+help = "Time limit of each map"
+
+[[commands]]
+name = "mp_restartgame"
+args = "<seconds>"
+help = "Restart the game after that many seconds"
+
+[[commands]]
+name = "sv_password"
+args = "<password>"
+help = "Password to join; \"\" for none"
+
+[[commands]]
+name = "exec"
+args = "<file.cfg>"
+help = "Run a configuration file of the cfg folder"
+
+[[commands]]
+name = "stats"
+help = "How busy the server is"
+
+[[commands]]
+name = "quit"
+help = "Stop the server"

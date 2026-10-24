@@ -41,6 +41,9 @@ pub struct Installed {
     /// The Java major version a Minecraft server needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub java: Option<u32>,
+    /// The game version it got (Minecraft's `1.21.4`), which plugins must suit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// What a server needs to run, once installed.
@@ -132,7 +135,11 @@ impl Installer {
         match &game.install {
             Install::Minecraft => format!("{} {}", setting("flavor"), setting("version")),
             Install::Shared { url, .. } => format!("shared {url}"),
-            Install::Steamcmd { app_id } => format!("steam {app_id}"),
+            Install::Steamcmd { app_id, beta: None } => format!("steam {app_id}"),
+            Install::Steamcmd {
+                app_id,
+                beta: Some(beta),
+            } => format!("steam {app_id} {beta}"),
         }
     }
 
@@ -176,18 +183,21 @@ impl Installer {
                         wanted: wanted.clone(),
                         got: wanted,
                         java: None,
+                        version: None,
                     }),
                 })
             }
-            Install::Steamcmd { app_id } => {
+            Install::Steamcmd { app_id, beta } => {
                 let record = match current {
                     Some(i) => i.clone(),
                     None => {
-                        self.steam(*app_id, dir, run_as, console).await?;
+                        self.steam(*app_id, beta.as_deref(), dir, run_as, console)
+                            .await?;
                         Installed {
                             got: wanted.clone(),
                             wanted,
                             java: None,
+                            version: None,
                         }
                     }
                 };
@@ -299,6 +309,7 @@ impl Installer {
             wanted: wanted.to_string(),
             got,
             java: Some(java),
+            version: Some(version),
         })
     }
 
@@ -396,6 +407,7 @@ impl Installer {
     async fn steam(
         &self,
         app_id: u32,
+        beta: Option<&str>,
         dir: &Path,
         run_as: &RunAs,
         console: &Console,
@@ -425,7 +437,10 @@ impl Installer {
         .await
         .context("unpacking SteamCMD")?;
 
-        console.system(format!("installing Steam app {app_id} with SteamCMD"));
+        console.system(match beta {
+            Some(beta) => format!("installing Steam app {app_id} ({beta}) with SteamCMD"),
+            None => format!("installing Steam app {app_id} with SteamCMD"),
+        });
         let mut last = Err(anyhow!("SteamCMD did not run"));
         // Its first run updates itself and sometimes exits with an error: again.
         for attempt in 1..=3 {
@@ -433,8 +448,11 @@ impl Installer {
             cmd.arg("+force_install_dir")
                 .arg(dir)
                 .args(["+login", "anonymous", "+app_update"])
-                .arg(app_id.to_string())
-                .args(["validate", "+quit"])
+                .arg(app_id.to_string());
+            if let Some(beta) = beta {
+                cmd.args(["-beta", beta]);
+            }
+            cmd.args(["validate", "+quit"])
                 .current_dir(&steamcmd)
                 .env_clear()
                 .env("HOME", dir)
@@ -447,30 +465,36 @@ impl Installer {
             }
         }
         last?;
-        // Steam games look for Steam's client library next to their user's home.
-        let client = steamcmd.join("linux64/steamclient.so");
-        let dest = fsops::inside(dir, ".steam/sdk64/steamclient.so")?;
-        fsops::as_user(run_as.uid, move || {
-            if client.exists() {
-                std::fs::create_dir_all(dest.parent().unwrap_or(&dest))?;
-                std::fs::copy(&client, &dest)?;
-            }
-            Ok(())
-        })
-        .await?;
+        // Steam games look for Steam's client library in their user's home: 64-bit
+        // ones in sdk64, 32-bit ones (older Source games) in sdk32.
+        for (from, to) in [("linux64", "sdk64"), ("linux32", "sdk32")] {
+            let client = steamcmd.join(from).join("steamclient.so");
+            let dest = fsops::inside(dir, &format!(".steam/{to}/steamclient.so"))?;
+            fsops::as_user(run_as.uid, move || {
+                if client.exists() {
+                    std::fs::create_dir_all(dest.parent().unwrap_or(&dest))?;
+                    std::fs::copy(&client, &dest)?;
+                }
+                Ok(())
+            })
+            .await?;
+        }
         console.system(format!("Steam app {app_id} installed"));
         Ok(())
     }
 
     // ---------------------------------------------------------------- helpers
 
-    fn tmp_file(&self, name: &str) -> anyhow::Result<PathBuf> {
+    pub(crate) fn tmp_file(&self, name: &str) -> anyhow::Result<PathBuf> {
         let dir = self.cfg.data_dir.join("tmp");
         std::fs::create_dir_all(&dir)?;
         Ok(dir.join(format!("{}-{name}", archipel_core::now())))
     }
 
-    async fn json<T: serde::de::DeserializeOwned>(&self, url: &str) -> anyhow::Result<T> {
+    pub(crate) async fn json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> anyhow::Result<T> {
         let resp = self
             .http
             .get(url)
@@ -485,7 +509,7 @@ impl Installer {
     }
 
     /// Downloads `url` to `dest`, saying how far along it is.
-    async fn download(
+    pub(crate) async fn download(
         &self,
         url: &str,
         dest: &Path,
@@ -538,13 +562,13 @@ impl Installer {
     }
 }
 
-enum Check {
+pub(crate) enum Check {
     Sha1(String),
     Sha256(String),
 }
 
 /// Copies a file archipel downloaded into a server's directory, as its user.
-async fn copy_as_user(from: &Path, to: PathBuf, uid: u32) -> anyhow::Result<()> {
+pub(crate) async fn copy_as_user(from: &Path, to: PathBuf, uid: u32) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     // Readable by the server's user for the copy.
     std::fs::set_permissions(from, std::fs::Permissions::from_mode(0o644))?;

@@ -36,10 +36,17 @@ fn go_to_login() {
     }
 }
 
+/// What a request carries.
+enum Body {
+    Json(String),
+    /// A file picked on the page, sent as it is.
+    File(web_sys::File),
+}
+
 async fn call(
     method: Method,
     path: &str,
-    json: Option<String>,
+    body: Option<Body>,
     abort: Option<&web_sys::AbortSignal>,
 ) -> Result<Response, String> {
     let mut builder = RequestBuilder::new(path).method(method);
@@ -49,11 +56,14 @@ async fn call(
         builder = builder.header("Authorization", &format!("Bearer {token}"));
     }
     builder = builder.abort_signal(abort);
-    let request = match json {
+    let request = match body {
         None => builder.build(),
-        Some(json) => builder
+        Some(Body::Json(json)) => builder
             .header("Content-Type", "application/json")
             .body(json),
+        Some(Body::File(file)) => builder
+            .header("Content-Type", "application/octet-stream")
+            .body(file),
     }
     .map_err(|e| e.to_string())?;
     let response = request
@@ -62,6 +72,9 @@ async fn call(
         .map_err(|_| "Cannot reach archipel. Is it running?".to_string())?;
     if response.ok() {
         return Ok(response);
+    }
+    if response.status() == 413 {
+        return Err("That file is too large.".into());
     }
     if response.status() == 401 && !path.ends_with("/login") && !desktop() {
         go_to_login();
@@ -74,8 +87,10 @@ async fn call(
         .unwrap_or_else(|_| format!("Something went wrong (error {status}).")))
 }
 
-fn json_body<B: Serialize>(body: &B) -> Option<String> {
-    Some(serde_json::to_string(body).expect("serializable"))
+fn json_body<B: Serialize>(body: &B) -> Option<Body> {
+    Some(Body::Json(
+        serde_json::to_string(body).expect("serializable"),
+    ))
 }
 
 async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, String> {
@@ -113,6 +128,13 @@ pub async fn put<B: Serialize, T: DeserializeOwned>(path: &str, body: &B) -> Res
 
 pub async fn put_empty<B: Serialize>(path: &str, body: &B) -> Result<(), String> {
     call(Method::PUT, path, json_body(body), None)
+        .await
+        .map(|_| ())
+}
+
+/// PUT a file as it is, ignoring the response.
+pub async fn upload(path: &str, file: web_sys::File) -> Result<(), String> {
+    call(Method::PUT, path, Some(Body::File(file)), None)
         .await
         .map(|_| ())
 }

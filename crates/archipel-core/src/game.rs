@@ -44,6 +44,12 @@ pub struct GameDef {
     /// Console commands making the files whole while a backup copies them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupDef>,
+    /// Files its owner adds to the server: plugins, maps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addons: Option<AddonsDef>,
+    /// What can be typed into its console, offered as one types.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CommandDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,7 +92,12 @@ pub enum Install {
     },
     /// A Steam dedicated server, logged in anonymously, in each server's directory.
     /// Updated when the server is reinstalled.
-    Steamcmd { app_id: u32 },
+    Steamcmd {
+        app_id: u32,
+        /// A branch of the app other than the default one: `x86-64`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        beta: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,14 +174,15 @@ pub enum SettingKind {
         default: String,
         options: Vec<ChoiceOption>,
         /// More options archipel lists itself, after these: `minecraft_versions`
-        /// (releases, newest first, those Paper builds when `flavor` is `paper`).
+        /// (releases, newest first, those Paper builds when `flavor` is `paper`),
+        /// `maps` (the maps among the server's addons).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options_from: Option<String>,
     },
 }
 
 /// The option sources archipel knows, for `options_from`.
-pub const OPTION_SOURCES: &[&str] = &["minecraft_versions"];
+pub const OPTION_SOURCES: &[&str] = &["minecraft_versions", "maps"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChoiceOption {
@@ -308,6 +320,65 @@ pub struct BackupDef {
     /// Typed in after the copy: `save-on`.
     #[serde(default)]
     pub after: Vec<String>,
+}
+
+/// A directory of the server where its owner adds files of their own: plugins,
+/// maps. They upload them, or pick them from `search`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddonsDef {
+    /// For people: "Plugins", "Maps". It names the server's tab.
+    pub label: String,
+    /// Relative to the server's directory: `plugins`.
+    pub dir: String,
+    /// The files that count, by extension: `jar`. Others there are left alone.
+    pub extensions: Vec<String>,
+    /// Said above the list: what they are and when they apply.
+    #[serde(default)]
+    pub help: String,
+    /// Settings they need: `{ flavor = "paper" }`. Otherwise the tab says so.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub when: BTreeMap<String, String>,
+    /// Where to find more: `modrinth`, Paper plugins on modrinth.com for the
+    /// server's Minecraft version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+}
+
+/// The addon catalogues archipel knows, for `search`.
+pub const ADDON_SEARCHES: &[&str] = &["modrinth"];
+
+impl AddonsDef {
+    /// Whether `name` is a file name this directory takes: no path, an extension
+    /// of `extensions`.
+    pub fn accepts(&self, name: &str) -> bool {
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+        !name.is_empty()
+            && name.len() <= 128
+            && !name.starts_with('.')
+            && !name.contains(['/', '\\', '\0', '\n', '\r'])
+            && ext.is_some_and(|e| self.extensions.iter().any(|x| x.eq_ignore_ascii_case(&e)))
+    }
+
+    /// The settings it lacks, as `(key, wanted value)`.
+    pub fn unmet<'a>(&'a self, settings: &BTreeMap<String, Value>) -> Vec<(&'a str, &'a str)> {
+        self.when
+            .iter()
+            .filter(|(k, v)| settings.get(*k).map(Value::as_text).as_deref() != Some(v.as_str()))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+}
+
+/// A console command, as the console offers it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandDef {
+    /// What is typed: `whitelist add`.
+    pub name: String,
+    /// What follows, for people: `<player>`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub args: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help: String,
 }
 
 impl GameDef {
@@ -461,6 +532,49 @@ impl GameDef {
                 return Err(at(format!("{}: `content` is for text files", file.path)));
             }
         }
+        if let Some(addons) = &self.addons {
+            let path = std::path::Path::new(&addons.dir);
+            if addons.dir.is_empty()
+                || path
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(at(format!(
+                    "addons.dir `{}` must be a plain relative path",
+                    addons.dir
+                )));
+            }
+            if addons.extensions.is_empty()
+                || addons
+                    .extensions
+                    .iter()
+                    .any(|e| e.is_empty() || !e.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                return Err(at(
+                    "addons.extensions must be extensions without their dot: `jar`".into(),
+                ));
+            }
+            if let Some(key) = addons.when.keys().find(|k| self.setting(k).is_none()) {
+                return Err(at(format!("addons.when: no setting `{key}`")));
+            }
+            if let Some(search) = &addons.search
+                && !ADDON_SEARCHES.contains(&search.as_str())
+            {
+                return Err(at(format!(
+                    "addons.search `{search}` is not one of {}",
+                    ADDON_SEARCHES.join(", ")
+                )));
+            }
+        }
+        if self.settings.iter().any(
+            |s| matches!(&s.kind, SettingKind::Choice { options_from: Some(f), .. } if f == "maps"),
+        ) && self.addons.is_none()
+        {
+            return Err(at("options_from `maps` needs [addons]".into()));
+        }
+        if let Some(c) = self.commands.iter().find(|c| c.name.trim().is_empty()) {
+            return Err(at(format!("a command has no name (help: {})", c.help)));
+        }
         if let Some(connect) = &self.connect {
             let mut ctx = ctx.clone();
             ctx.insert("host".into(), Value::Text("example.com".into()));
@@ -554,6 +668,6 @@ mod shipped {
                 count += 1;
             }
         }
-        assert!(count >= 3);
+        assert!(count >= 6);
     }
 }

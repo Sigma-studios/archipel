@@ -187,6 +187,13 @@ impl Supervisor {
             .clone()
     }
 
+    /// Counts bytes just written into a server's files, until it is measured again.
+    pub fn grew(&self, id: u64, bytes: u64) {
+        if let Some(b) = self.0.disk.lock().get_mut(&id) {
+            *b += bytes;
+        }
+    }
+
     pub fn disk_bytes(&self, id: u64) -> Option<u64> {
         self.0.disk.lock().get(&id).copied()
     }
@@ -300,6 +307,27 @@ impl Supervisor {
             bail!(
                 "your servers' files take {disk_mb} MB, more than your {} MB: delete a server \
                  or ask for more",
+                owner.quota.disk_mb
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the owner's disk quota leaves room for `extra` more bytes in the
+    /// server's files (hosted: the desktop has no quota).
+    pub fn disk_room(&self, row: &ServerRow, extra: u64) -> anyhow::Result<()> {
+        if !self.hosted() {
+            return Ok(());
+        }
+        let Some(owner) = self.0.store.user_by_id(row.owner_id)? else {
+            return Ok(());
+        };
+        let used_mb = self.owner_disk_bytes(owner.id) / (1024 * 1024);
+        let extra_mb = extra.div_ceil(1024 * 1024);
+        if used_mb + extra_mb > owner.quota.disk_mb {
+            bail!(
+                "your servers' files take {used_mb} MB of your {} MB, and this is {extra_mb} MB: \
+                 delete something first, or ask for more",
                 owner.quota.disk_mb
             );
         }

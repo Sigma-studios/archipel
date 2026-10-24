@@ -441,7 +441,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .field small, .field-help { color: var(--text-muted); font-size: 12px; }
 .required { color: var(--accent); margin-left: 3px; }
 .reinstall-note { color: var(--warning-text); font-size: 12px; }
-input[type="text"], input[type="password"], input[type="number"], select, textarea {
+input[type="text"], input[type="password"], input[type="number"], input[type="search"], select, textarea {
   font: inherit;
   color: var(--text-primary);
   background: var(--surface-1);
@@ -881,6 +881,59 @@ input:disabled, textarea:disabled { background: var(--surface-2); color: var(--t
 .console-input:focus-within { box-shadow: inset 0 0 0 2px #ff8a4c55; }
 .console-input .button { border-color: #3a322a; background: #27211b; color: #ece6df; }
 .console-input .button:hover { background: #312a23; }
+
+/* Commands offered as one types, above the command line. */
+.console-suggest {
+  border-top: 1px solid #2c2620;
+  background: #1b1713;
+  font: 12.5px/1.5 var(--mono);
+  max-height: 260px;
+  overflow: auto;
+  /* Items' offsets count from here, to keep the picked one in sight. */
+  position: relative;
+}
+.suggest-title { padding: 6px 16px 2px; color: #8f877e; font-family: var(--sans); }
+.console-suggest ul { list-style: none; margin: 0; padding: 4px 0; }
+.suggest-item, .suggest-hint { padding: 3px 16px; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.suggest-item { cursor: pointer; }
+.suggest-item:hover { background: rgba(255, 255, 255, 0.05); }
+.suggest-item.active { background: #312a23; box-shadow: inset 2px 0 0 #ff8a4c; }
+.console-suggest code { color: #ffb385; }
+.suggest-args { color: #a59c92; }
+.suggest-help { color: #8f877e; font-family: var(--sans); margin-left: auto; }
+
+/* Addons: plugins, maps. */
+.addons-card { transition: border-color 0.15s, background 0.15s; margin-bottom: 16px; }
+.addons-card.dragging { border: 2px dashed var(--accent); background: var(--accent-soft); }
+.addons-card .card-head .grow, .addon-item .grow, .catalogue-item .grow { flex: 1; min-width: 0; }
+.addons-card .card-head > div:first-child { flex: 1; }
+.addons-help { margin: 4px 0 0; max-width: 70ch; }
+.addons-card .button.disabled { opacity: 0.6; pointer-events: none; }
+.addons-empty { padding: 28px 20px; }
+.addon-list, .catalogue-list { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; }
+.addon-item, .catalogue-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.addon-item:last-child, .catalogue-item:last-child { border-bottom: 0; }
+.addon-name { font-weight: 650; overflow-wrap: anywhere; }
+.addon-maps { font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
+.addon-maps code { margin-right: 6px; }
+.catalogue .toolbar input { flex: 1; min-width: 200px; }
+.catalogue-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  flex: none;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+}
 
 .split { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
 @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }

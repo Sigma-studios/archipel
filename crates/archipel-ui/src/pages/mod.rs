@@ -1,4 +1,5 @@
 pub mod account;
+pub mod addons;
 pub mod admin;
 pub mod new_server;
 pub mod server;

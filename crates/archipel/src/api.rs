@@ -27,6 +27,8 @@ use crate::supervisor::Supervisor;
 use crate::{files, fsops};
 
 const SESSION_DAYS: u64 = 30;
+/// The largest addon one may upload: a big map.
+const MAX_UPLOAD: usize = 512 * 1024 * 1024;
 
 pub struct App {
     pub cfg: Config,
@@ -62,6 +64,15 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/servers/{id}/console", get(console).post(command))
         .route("/api/servers/{id}/console/lines", get(console_lines))
         .route("/api/servers/{id}/files", get(list_files).put(save_file))
+        .route("/api/servers/{id}/addons", get(list_addons))
+        .route("/api/servers/{id}/addons/search", get(search_addons))
+        .route("/api/servers/{id}/addons/install", post(install_addon))
+        .route(
+            "/api/servers/{id}/addons/files/{name}",
+            put(upload_addon)
+                .delete(delete_addon)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD)),
+        )
         .route("/api/overview", get(overview))
         .route("/api/internet", get(internet))
         .route("/api/internet/check", post(check_internet))
@@ -423,7 +434,7 @@ async fn games(State(app): S, _: Caller) -> Json<Vec<GameDef>> {
 /// options, then the listed ones.
 async fn setting_options(
     State(app): S,
-    _: Caller,
+    caller: Caller,
     Path((game, key)): Path<(String, String)>,
     Query(chosen): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<archipel_core::game::ChoiceOption>>> {
@@ -450,6 +461,29 @@ async fn setting_options(
                 .await
                 .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?
         }
+        // The maps among a server's addons (`_server`), after the game's own.
+        "maps" => match chosen.get("_server").and_then(|s| s.parse::<u64>().ok()) {
+            Some(id) => {
+                let row = load(&app, &caller, id)?;
+                let addons = app
+                    .games
+                    .get(&game)
+                    .and_then(|g| g.addons.as_ref())
+                    .filter(|_| row.game == game)
+                    .ok_or_else(|| not_found("that server has no maps of its own"))?;
+                let dir = app.cfg.server_dir(id);
+                if dir.exists() {
+                    crate::addons::maps(addons, &dir, fsops::uid_of(id))
+                        .await?
+                        .into_iter()
+                        .filter(|m| !options.iter().any(|o| o.value == *m))
+                        .collect()
+                } else {
+                    vec![]
+                }
+            }
+            None => vec![],
+        },
         other => return Err(not_found(format!("no option source {other}"))),
     };
     let newest = listed.first().cloned();
@@ -941,6 +975,207 @@ async fn save_file(
         .find(|f| f.path == q.path)
         .map(Json)
         .ok_or_else(|| not_found("no such file"))
+}
+
+// ---------------------------------------------------------------- addons
+
+/// The server, its game's addons and its settings (defaults filled in).
+fn with_addons(
+    app: &App,
+    caller: &Caller,
+    id: u64,
+) -> ApiResult<(
+    ServerRow,
+    archipel_core::game::AddonsDef,
+    std::collections::BTreeMap<String, Value>,
+)> {
+    let row = load(app, caller, id)?;
+    let game = app
+        .games
+        .get(&row.game)
+        .ok_or_else(|| not_found("archipel no longer knows this server's game"))?;
+    let addons = game
+        .addons
+        .clone()
+        .ok_or_else(|| not_found(format!("{} takes no addons", game.name)))?;
+    let settings = game
+        .settings_from(&row.settings)
+        .unwrap_or_else(|_| row.settings.clone());
+    Ok((row, addons, settings))
+}
+
+/// The game version addons must suit: the one installed, or the one the
+/// settings ask for (the newest, for `latest`).
+async fn addon_game_version(
+    app: &App,
+    row: &ServerRow,
+    settings: &std::collections::BTreeMap<String, Value>,
+) -> Option<String> {
+    // What is installed, unless the settings since asked for another version.
+    let wanted = app
+        .games
+        .get(&row.game)
+        .map(|g| crate::install::Installer::wanted(g, settings));
+    let installed = row
+        .installed
+        .as_deref()
+        .and_then(|i| serde_json::from_str::<crate::install::Installed>(i).ok())
+        .filter(|i| Some(&i.wanted) == wanted.as_ref());
+    if let Some(v) = installed.and_then(|i| i.version) {
+        return Some(v);
+    }
+    let asked = settings.get("version").map(Value::as_text)?;
+    if asked != "latest" {
+        return Some(asked);
+    }
+    let paper = settings
+        .get("flavor")
+        .is_some_and(|f| f.as_text() == "paper");
+    app.supervisor
+        .installer()
+        .minecraft_versions(paper)
+        .await
+        .ok()?
+        .into_iter()
+        .next()
+}
+
+async fn list_addons(
+    State(app): S,
+    caller: Caller,
+    Path(id): Path<u64>,
+) -> ApiResult<Json<AddonsView>> {
+    let (row, addons, settings) = with_addons(&app, &caller, id)?;
+    let game = app.games.get(&row.game).expect("checked");
+    let dir = app.cfg.server_dir(id);
+    let files = if dir.exists() {
+        crate::addons::list(&addons, &dir, fsops::uid_of(id)).await?
+    } else {
+        vec![]
+    };
+    let unmet = addons
+        .unmet(&settings)
+        .into_iter()
+        .map(|(key, value)| {
+            let setting = game.setting(key).expect("validated");
+            let shown = match &setting.kind {
+                archipel_core::game::SettingKind::Choice { options, .. } => options
+                    .iter()
+                    .find(|o| o.value == value)
+                    .map_or(value.to_string(), |o| o.label.clone()),
+                _ => value.to_string(),
+            };
+            format!("{}: {shown}", setting.label)
+        })
+        .collect();
+    let game_version = match addons.search {
+        Some(_) => addon_game_version(&app, &row, &settings).await,
+        None => None,
+    };
+    Ok(Json(AddonsView {
+        files,
+        unmet,
+        game_version,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+}
+
+async fn search_addons(
+    State(app): S,
+    caller: Caller,
+    Path(id): Path<u64>,
+    Query(q): Query<SearchQuery>,
+) -> ApiResult<Json<Vec<AddonResult>>> {
+    let (row, addons, settings) = with_addons(&app, &caller, id)?;
+    if addons.search.is_none() {
+        return Err(not_found("this game has no catalogue to search"));
+    }
+    if q.q.len() > 100 {
+        return Err(bad("that search is too long"));
+    }
+    let version = addon_game_version(&app, &row, &settings).await;
+    crate::addons::search(app.supervisor.installer(), q.q.trim(), version.as_deref())
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+async fn install_addon(
+    State(app): S,
+    caller: Caller,
+    Path(id): Path<u64>,
+    Json(req): Json<InstallAddon>,
+) -> ApiResult<Json<InstalledAddons>> {
+    let (row, addons, settings) = with_addons(&app, &caller, id)?;
+    if addons.search.is_none() {
+        return Err(not_found("this game has no catalogue to install from"));
+    }
+    if let Some((key, value)) = addons.unmet(&settings).first() {
+        return Err(bad(format!(
+            "{} need the setting {key} to be {value}",
+            addons.label
+        )));
+    }
+    app.supervisor.disk_room(&row, 0).map_err(refused)?;
+    let version = addon_game_version(&app, &row, &settings).await;
+    let dir = app.cfg.server_dir(id);
+    let uid = fsops::uid_of(id);
+    fsops::ensure_server_dir(&dir, uid).context("preparing its directory")?;
+    let console = app.supervisor.instance(id).console.clone();
+    let files = crate::addons::install(
+        app.supervisor.installer(),
+        &addons,
+        &dir,
+        uid,
+        &req.id,
+        version.as_deref(),
+        &console,
+    )
+    .await
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(Json(InstalledAddons { files }))
+}
+
+async fn upload_addon(
+    State(app): S,
+    caller: Caller,
+    Path((id, name)): Path<(u64, String)>,
+    body: axum::body::Bytes,
+) -> ApiResult<StatusCode> {
+    let (row, addons, _) = with_addons(&app, &caller, id)?;
+    if body.is_empty() {
+        return Err(bad("that file is empty"));
+    }
+    app.supervisor
+        .disk_room(&row, body.len() as u64)
+        .map_err(refused)?;
+    let dir = app.cfg.server_dir(id);
+    let uid = fsops::uid_of(id);
+    fsops::ensure_server_dir(&dir, uid).context("preparing its directory")?;
+    let bytes = body.len() as u64;
+    crate::addons::save(&addons, &dir, uid, &name, body.to_vec())
+        .await
+        .map_err(|e| bad(format!("{e:#}")))?;
+    app.supervisor.grew(id, bytes);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_addon(
+    State(app): S,
+    caller: Caller,
+    Path((id, name)): Path<(u64, String)>,
+) -> ApiResult<StatusCode> {
+    let (_, addons, _) = with_addons(&app, &caller, id)?;
+    let dir = app.cfg.server_dir(id);
+    crate::addons::remove(&addons, &dir, fsops::uid_of(id), &name)
+        .await
+        .map_err(|e| not_found(format!("{e:#}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------- machine and users
