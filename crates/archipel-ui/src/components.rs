@@ -1,4 +1,6 @@
-use archipel_core::api::{Internet, Reach, ReachState, ServerState, ServerView, UserView};
+use archipel_core::api::{
+    Internet, Outside, Reach, ReachState, ServerState, ServerView, UserView, Verification,
+};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -206,6 +208,28 @@ fn host_of(address: &str) -> &str {
     address.rsplit_once(':').map_or(address, |(host, _)| host)
 }
 
+/// What the last check from outside saw, if one was made.
+fn outside(verified: Option<&Verification>) -> Option<Outside> {
+    verified.map(|v| v.outside)
+}
+
+/// Said under "Friends can join" when no check from outside could be made.
+fn unchecked(verified: Option<&Verification>) -> Option<impl IntoView + use<>> {
+    let v = verified.filter(|v| !matches!(v.outside, Outside::Reached | Outside::NotReached));
+    let why = v
+        .and_then(|v| v.detail.clone())
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
+    v.map(|_| view! { <p class="small muted">{format!("Not checked from outside{why}.")}</p> })
+}
+
+/// Why the hostname set for friends is not the address given, if it is not.
+fn host_warning(verified: Option<&Verification>) -> Option<impl IntoView + use<>> {
+    verified
+        .and_then(|v| v.host_note.clone())
+        .map(|note| view! { <p class="small reach-warn">{format!("⚠ {note}.")}</p> })
+}
+
 /// Who can join, compactly, for a server's card (desktop app): the address to give
 /// and a line saying who it works for.
 #[component]
@@ -214,14 +238,23 @@ pub fn ReachSummary(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
     view! {
         {move || {
             let r = reach.get();
+            let outside = outside(r.verified.as_ref());
             let address = match r.state {
+                // Nothing gets in: the address at home is the one that works.
+                ReachState::Internet if outside == Some(Outside::NotReached) => r.local.clone(),
                 ReachState::Internet => r.public.clone().or(r.local.clone()),
                 _ => r.local.clone(),
             };
             let (class, status) = match r.state {
                 ReachState::Checking => ("reach-status muted", "Opening ports on your router…"),
+                ReachState::Internet if outside == Some(Outside::NotReached) => {
+                    ("reach-status reach-warn", "⚠ Nothing gets through from outside")
+                }
                 ReachState::Internet if r.firewall.is_some() => {
                     ("reach-status reach-warn", "⚠ This PC's firewall turns friends away")
+                }
+                ReachState::Internet if outside == Some(Outside::Reached) => {
+                    ("reach-status reach-good", "✓ Friends can join (checked from outside)")
                 }
                 ReachState::Internet => ("reach-status reach-good", "✓ Friends can join"),
                 ReachState::LocalOnly => ("reach-status reach-warn", "⚠ Only your home network can join"),
@@ -254,6 +287,12 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
             let r = reach.get();
             let detail = r.detail.clone().map(|d| view! { <div class="small reach-detail">{d}</div> });
             let firewall = r.firewall.clone().map(|f| view! { <p class="reach-firewall">{f}</p> });
+            let verified = r.verified.as_ref();
+            let this_pc = r
+                .local
+                .as_deref()
+                .map(|l| format!(" ({})", host_of(l)))
+                .unwrap_or_default();
             match r.state {
                 ReachState::Checking => view! {
                     <div class="note reach-panel" role="status">
@@ -261,19 +300,48 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
                         " Opening ports on your router…"
                     </div>
                 }.into_any(),
+                ReachState::Internet if outside(verified) == Some(Outside::NotReached) => {
+                    let why = verified
+                        .and_then(|v| v.detail.clone())
+                        .map(|d| view! { <div class="small reach-detail">{d}</div> });
+                    view! {
+                        <div class="note note-warning reach-panel" role="status">
+                            <strong>"⚠ Your router says the ports are open, but nothing got through from outside"</strong>
+                            {why}
+                            <p>
+                                {format!(
+                                    "Friends can't join until it does. Restarting the router often helps; otherwise forward this server's ports to this PC{this_pc} by hand in the router's settings."
+                                )}
+                            </p>
+                            {firewall}
+                            <span>"Players at home can join at:"</span>
+                            {r.local.clone().map(|address| view! { <CopyAddress address/> })}
+                        </div>
+                    }.into_any()
+                }
                 ReachState::Internet if r.firewall.is_some() => view! {
                     <div class="note note-warning reach-panel" role="status">
                         <strong>"⚠ Your router lets friends in, but this PC's firewall turns them away"</strong>
                         {firewall}
                         <span>"Then give them this address:"</span>
                         {r.public.clone().or(r.local.clone()).map(|address| view! { <CopyAddress address/> })}
+                        {host_warning(verified)}
+                        {unchecked(verified)}
                     </div>
                 }.into_any(),
                 ReachState::Internet => view! {
                     <div class="note note-good reach-panel" role="status">
-                        <strong>"✓ Friends can join"</strong>
+                        <strong>
+                            {if outside(verified) == Some(Outside::Reached) {
+                                "✓ Friends can join (checked from outside)"
+                            } else {
+                                "✓ Friends can join"
+                            }}
+                        </strong>
                         <span>" Give them this address:"</span>
                         {r.public.clone().or(r.local.clone()).map(|address| view! { <CopyAddress address/> })}
+                        {host_warning(verified)}
+                        {unchecked(verified)}
                         {firewall}
                     </div>
                 }.into_any(),
@@ -283,11 +351,6 @@ pub fn ReachPanel(#[prop(into)] reach: Signal<Reach>) -> impl IntoView {
                     } else {
                         r.forward.join(", ")
                     };
-                    let this_pc = r
-                        .local
-                        .as_deref()
-                        .map(|l| format!(" ({})", host_of(l)))
-                        .unwrap_or_default();
                     view! {
                         <div class="note note-warning reach-panel" role="status">
                             <strong>"⚠ Only your home network can join"</strong>
@@ -421,7 +484,19 @@ pub fn InternetCard() -> impl IntoView {
                     .as_deref()
                     .map(|ip| format!(" ({ip})"))
                     .unwrap_or_default();
-                let detail = i.detail.clone().map(|d| view! { <div class="small reach-detail">{d}</div> });
+                let verified = i.verified.as_ref();
+                let not_reached = i.state == ReachState::Internet
+                    && outside(verified) == Some(Outside::NotReached);
+                // When nothing got through, what the check saw; otherwise the router's.
+                let detail = if not_reached {
+                    verified.and_then(|v| v.detail.clone())
+                } else {
+                    i.detail.clone()
+                };
+                let detail = detail.map(|d| view! { <div class="small reach-detail">{d}</div> });
+                let host = verified.and_then(|v| v.host.clone()).filter(|h| h.matches).map(|h| view! {
+                    <p>"Friends can use " <strong>{h.name}</strong> " as this PC's address."</p>
+                });
                 let firewall = i
                     .firewall
                     .clone()
@@ -433,19 +508,35 @@ pub fn InternetCard() -> impl IntoView {
                         "Checking whether friends can reach this PC…".to_string(),
                         "archipel is asking your router to open a test port.".to_string(),
                     ),
+                    ReachState::Internet if not_reached => (
+                        "note note-warning reach-panel",
+                        "⚠ Your router says the ports are open, but nothing got through from outside".to_string(),
+                        format!(
+                            "archipel asked a server on the internet to reach this PC on a test port, and it could not. Restarting the router often helps; otherwise forward ports {} (TCP and UDP) to this PC{this_pc} by hand.",
+                            i.ports
+                        ),
+                    ),
                     ReachState::Internet if i.firewall.is_some() => (
                         "note note-warning reach-panel",
                         "⚠ Your router lets friends in, but this PC's firewall turns them away".to_string(),
                         "Open the ports in the firewall (below), then friends can join from the internet.".to_string(),
                     ),
-                    ReachState::Internet => (
-                        "note note-good reach-panel",
-                        "✓ Friends can join from the internet".to_string(),
-                        format!(
-                            "Your router opens ports for archipel by itself{}. Each server's page gives the address to share.",
-                            i.public_ip.as_deref().map(|ip| format!(" (your public address is {ip})")).unwrap_or_default()
-                        ),
-                    ),
+                    ReachState::Internet => {
+                        let checked = outside(verified) == Some(Outside::Reached);
+                        (
+                            "note note-good reach-panel",
+                            if checked {
+                                "✓ Friends can join from the internet (checked from outside)".to_string()
+                            } else {
+                                "✓ Friends can join from the internet".to_string()
+                            },
+                            format!(
+                                "Your router opens ports for archipel by itself{}{}. Each server's page gives the address to share.",
+                                i.public_ip.as_deref().map(|ip| format!(" (your public address is {ip})")).unwrap_or_default(),
+                                if checked { ", and a check from the internet got through" } else { "" },
+                            ),
+                        )
+                    }
                     ReachState::LocalOnly => (
                         "note note-warning reach-panel",
                         "⚠ Only your home network can join".to_string(),
@@ -467,11 +558,17 @@ pub fn InternetCard() -> impl IntoView {
                             {title}
                         </strong>
                         <p>{body}</p>
+                        {host}
+                        {(i.state == ReachState::Internet).then(|| host_warning(verified))}
+                        {(i.state == ReachState::Internet).then(|| unchecked(verified))}
                         {firewall}
                         {detail}
-                        <button class="button button-small" on:click=check disabled=checking>
-                            "Check again"
-                        </button>
+                        <div class="internet-actions">
+                            <button class="button button-small" on:click=check disabled=checking>
+                                "Check again"
+                            </button>
+                            <a href="/settings" class="link-button small">"Settings"</a>
+                        </div>
                     </section>
                 }
             }}
