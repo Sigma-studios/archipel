@@ -78,6 +78,7 @@ pub async fn build(cfg: config::Config) -> anyhow::Result<Built> {
         store,
         games,
         supervisor: supervisor.clone(),
+        prober: (mode == Mode::Hosted && cfg.probe).then(probe::Prober::default),
     });
     match mode {
         Mode::Hosted => api::ensure_admin(&app)?,
@@ -108,7 +109,14 @@ pub async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening on {listen}"))?;
     info!("archipel ready on http://{listen}");
-    let server = axum::serve(listener, api::router(app));
+    if app.prober.is_some() {
+        info!("desktop apps may ask to be checked from outside (ARCHIPEL_PROBE)");
+    }
+    // The peer's address, for probes from outside.
+    let server = axum::serve(
+        listener,
+        api::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
     tokio::select! {
         result = server => result.context("serving")?,
         _ = shutdown_signal() => {
