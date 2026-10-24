@@ -107,17 +107,19 @@ away even when the router forwards: archipel says so, with how to open the pool 
 it, until it sees the ports open.
 
 A router may also accept a forwarding and not honour it, or the public address may
-have changed. So when the router says yes, archipel checks from outside: it listens
-on a spare port of the pool and asks a hosted archipel on the internet
-(`https://games.sigma-dev.eu` by default; any archipel run with
-`ARCHIPEL_PROBE=on` will do) to reach it there, over TCP and UDP. That service sees
-only your public address and that port. The check runs when the app opens, on
-"Check again" and every 20 minutes, never while a server starts. Then the app says "checked from outside", or that nothing
-got through and why. Under **Settings** you can name another archipel to ask, or
-turn checking off (the app then says what the router says, as before). You can also
-give a hostname for friends, such as a dynamic DNS name like `yourname.ddns.net`.
-Servers show it as their address only once the check saw it point to this
-connection; otherwise they keep the IP address and say why.
+have changed; or it refuses, and you forward the pool by hand. So archipel checks
+from outside, whatever the router said: it listens on a spare port of the pool and
+asks a hosted archipel on the internet (`https://games.sigma-dev.eu` by default; any
+archipel run with `ARCHIPEL_PROBE=on` will do) to reach it there, over TCP and UDP.
+That service sees only your public address and that port. The check runs when the
+app opens, on "Check again" and every 20 minutes, never while a server starts. Then
+the app says "checked from outside", or that nothing got through and why. When the
+router would not open the ports but the check gets through (the pool forwarded by
+hand), friends can join and the app says so. Under **Settings** you can name another
+archipel to ask, or turn checking off (the app then says what the router says, as
+before). You can also give a hostname for friends, such as a dynamic DNS name like
+`yourname.ddns.net`. Servers show it as their address only once the check saw it
+point to this connection; otherwise they keep the IP address and say why.
 
 Its data is in `~/.local/share/archipel`. Servers get the app's `PATH`. On NixOS,
 the games archipel downloads (Java, SteamCMD, Urban Terror) are built for usual

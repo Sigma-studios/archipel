@@ -525,7 +525,7 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
                 // This computer's last check from outside stands for its servers.
                 let verified = reacher
                     .verified()
-                    .filter(|_| status.state == ReachState::Internet);
+                    .filter(|_| status.state != ReachState::Checking);
                 let hostname = crate::reach::settings(&app.store)
                     .map(|s| s.public_host)
                     .unwrap_or_default();
@@ -536,19 +536,12 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
                     .and_then(|ip| {
                         connect_at(crate::reach::public_host(ip, &hostname, verified.as_ref()))
                     });
-                let forward = match (status.state, game) {
-                    (ReachState::LocalOnly, Some(g)) => g
-                        .ports
-                        .iter()
-                        .filter_map(|p| {
-                            let number = row.ports.get(&p.name)?;
-                            let protocol = match p.protocol {
-                                archipel_core::game::Protocol::Tcp => "TCP",
-                                archipel_core::game::Protocol::Udp => "UDP",
-                            };
-                            Some(format!("{protocol} {number}"))
-                        })
-                        .collect(),
+                // The whole pool: every server's ports, and the spare one the check
+                // from outside tries.
+                let forward = match (status.state, app.cfg.port_range()) {
+                    (ReachState::LocalOnly, Ok((first, last))) => {
+                        vec![format!("ports {first}-{last} (TCP and UDP)")]
+                    }
                     _ => Vec::new(),
                 };
                 (
@@ -985,7 +978,7 @@ async fn internet(State(app): S, _: Caller) -> ApiResult<Json<Internet>> {
     let status = reacher.machine();
     let verified = reacher
         .verified()
-        .filter(|_| status.state == ReachState::Internet);
+        .filter(|_| status.state != ReachState::Checking);
     let (first, last) = app.cfg.port_range()?;
     Ok(Json(Internet {
         state: status.state,

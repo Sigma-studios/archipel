@@ -43,12 +43,13 @@ browsed at (`window.location.hostname`). Settings are `Value`s: a JSON string,
 number or boolean, as the game's `SettingDef` says.
 
 On the desktop, `ServerView.reach` says who can join a running server: `state` is
-`checking`, `internet` (the router forwards its ports: `public` is the address to
-share), `local_only` (it would not: `forward` lists the ports to forward by hand)
+`checking`, `internet` (friends can join: the router forwards its ports, or a
+check from outside got through where it would not; `public` is the address to
+share), `local_only` (it would not: `forward` names the pool, to forward by hand)
 or `no_public_address` (the connection has none of its own, whatever the router
 does); `local` is the address on the home network, `detail` what went wrong.
 `verified` (on `Internet` too) is what this computer's last check from outside
-saw, while the state is `internet`: `outside` is `reached`, `not_reached` (with
+saw, made whatever the router said: `outside` is `reached`, `not_reached` (with
 `detail`), `unverifiable` (no spare port, IPv6) or `unavailable` (checking off, or
 the hosted archipel did not answer). `public` uses the settings' `public_host`
 only once that check saw the name lead to this connection (`host`); otherwise
