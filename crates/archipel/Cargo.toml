@@ -34,3 +34,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 igd-next = { version = "0.18", default-features = false, features = ["aio_tokio"] }
+xmltree = "0.10"

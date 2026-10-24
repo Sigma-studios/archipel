@@ -140,7 +140,7 @@ impl Reacher {
                 },
                 None,
             ),
-            Some(ip) => forward(ip, ports, public_ip).await,
+            Some(ip) => forward(&self.http, ip, ports, public_ip).await,
         }
     }
 
@@ -233,7 +233,12 @@ impl Reacher {
 }
 
 /// Asks the router to forward `ports` to `ip`: NAT-PMP, then UPnP.
-async fn forward(ip: Ipv4Addr, ports: &[u16], public_ip: Option<IpAddr>) -> (Status, Option<Via>) {
+async fn forward(
+    http: &reqwest::Client,
+    ip: Ipv4Addr,
+    ports: &[u16],
+    public_ip: Option<IpAddr>,
+) -> (Status, Option<Via>) {
     let mut problems = Vec::new();
     let mut router_ip = None;
     for attempt in [Attempt::NatPmp, Attempt::Upnp] {
@@ -242,7 +247,7 @@ async fn forward(ip: Ipv4Addr, ports: &[u16], public_ip: Option<IpAddr>) -> (Sta
                 Some(gw) => natpmp_forward(gw, ip, ports).await,
                 None => Err(anyhow!("no default route").into()),
             },
-            Attempt::Upnp => upnp_forward(ip, ports).await,
+            Attempt::Upnp => upnp_forward(http, ip, ports).await,
         };
         match tried {
             Ok((via, external)) => return (judge(true, external, ip, public_ip, None), Some(via)),
@@ -358,28 +363,27 @@ async fn natpmp_forward(gateway: Ipv4Addr, ip: Ipv4Addr, ports: &[u16]) -> Forwa
     Ok((via, Some(IpAddr::V4(external))))
 }
 
-async fn upnp_forward(ip: Ipv4Addr, ports: &[u16]) -> Forwarded {
-    let search = |to: SocketAddr, wait: u64| {
-        let mut options = igd_next::SearchOptions::default();
-        options.broadcast_address = to;
-        options.timeout = Some(Duration::from_secs(wait));
-        options.single_search_timeout = Some(Duration::from_secs(2));
-        igd_next::aio::tokio::search_gateway(options)
-    };
+async fn upnp_forward(http: &reqwest::Client, ip: Ipv4Addr, ports: &[u16]) -> Forwarded {
     // The router itself first: its answer to a search sent to everyone comes from
     // its own address, which a firewall here (NixOS's, by default) does not take
     // for an answer and drops; to a search sent to it, it is one.
     let found = match gateway() {
-        Some(router) => search(SocketAddr::V4(SocketAddrV4::new(router, 1900)), 2)
+        Some(router) => upnp_ask(http, router)
             .await
+            .map_err(|e| debug!("UPnP, asking the router {router}: {e:#}"))
             .ok(),
         None => None,
     };
     let gateway = match found {
         Some(gateway) => gateway,
-        None => search(SocketAddr::V4(SocketAddrV4::new(SSDP, 1900)), 4)
-            .await
-            .map_err(|e| anyhow!("no answer ({e})"))?,
+        None => {
+            let mut options = igd_next::SearchOptions::default();
+            options.timeout = Some(Duration::from_secs(4));
+            options.single_search_timeout = Some(Duration::from_secs(2));
+            igd_next::aio::tokio::search_gateway(options)
+                .await
+                .map_err(|e| anyhow!("no answer ({e})"))?
+        }
     };
     let external = gateway.get_external_ip().await.ok();
     let via = Via::Upnp(gateway);
@@ -387,6 +391,199 @@ async fn upnp_forward(ip: Ipv4Addr, ports: &[u16]) -> Forwarded {
         return Err(Failure { external, error });
     }
     Ok((via, external))
+}
+
+/// What a UPnP search asks for: the router, or its WAN connection service.
+const SEARCH_TARGETS: &[&str] = &[
+    "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+    "urn:schemas-upnp-org:service:WANIPConnection:1",
+    "urn:schemas-upnp-org:service:WANPPPConnection:1",
+];
+
+/// UPnP's search, sent to the router alone, and the gateway it describes.
+///
+/// (igd-next's search, sent there, names the router in its `HOST` header, as the
+/// specification has it for such a search; many routers only answer one naming
+/// the multicast address, as a search sent to everyone does. Both are sent.)
+async fn upnp_ask(http: &reqwest::Client, router: Ipv4Addr) -> anyhow::Result<Gateway<Tokio>> {
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let to = SocketAddrV4::new(router, 1900);
+    for host in [format!("{SSDP}:1900"), to.to_string()] {
+        for target in SEARCH_TARGETS {
+            let search = format!(
+                "M-SEARCH * HTTP/1.1\r\nHOST: {host}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n\
+                 ST: {target}\r\n\r\n"
+            );
+            socket.send_to(search.as_bytes(), to).await?;
+        }
+    }
+    let until = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut buf = [0u8; 2048];
+    let mut tried = std::collections::HashSet::new();
+    loop {
+        let (n, from) = tokio::time::timeout_at(until, socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| anyhow!("no answer"))??;
+        if from.ip() != IpAddr::V4(router) {
+            continue;
+        }
+        let Some(location) = search_location(&buf[..n]) else {
+            continue;
+        };
+        if !tried.insert(location.clone()) {
+            continue;
+        }
+        match describe_gateway(http, router, &location).await {
+            Ok(gateway) => return Ok(gateway),
+            Err(e) => debug!("UPnP, the router's description at {location}: {e:#}"),
+        }
+    }
+}
+
+/// The `LOCATION` of a search's answer: the device's description.
+fn search_location(answer: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(answer).ok()?;
+    if !text.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("location")
+            .then(|| value.trim().to_string())
+    })
+}
+
+/// The gateway the router describes at `location`: its WAN connection service and
+/// the arguments of that service's actions, as igd-next's search would find them.
+async fn describe_gateway(
+    http: &reqwest::Client,
+    router: Ipv4Addr,
+    location: &str,
+) -> anyhow::Result<Gateway<Tokio>> {
+    let at_router = |url: &reqwest::Url| {
+        url.scheme() == "http" && url.host_str() == Some(router.to_string().as_str())
+    };
+    let url = reqwest::Url::parse(location)?;
+    if !at_router(&url) {
+        bail!("not on the router");
+    }
+    let fetch = |url: reqwest::Url| async move {
+        let text = http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        anyhow::Ok(xmltree::Element::parse(text.as_bytes())?)
+    };
+    let root = fetch(url.clone()).await?;
+    let base = root
+        .get_child("URLBase")
+        .and_then(|b| b.get_text())
+        .and_then(|b| reqwest::Url::parse(b.trim()).ok())
+        .unwrap_or_else(|| url.clone());
+    let (service_type, scpd, control) = wan_service(&root).context("no WAN connection service")?;
+    let (scpd, control) = (base.join(&scpd)?, base.join(&control)?);
+    if !at_router(&scpd) || !at_router(&control) {
+        bail!("its service is not on the router");
+    }
+    let control_schema = action_arguments(&fetch(scpd.clone()).await?);
+    if control_schema.is_empty() {
+        bail!("its service lists no actions");
+    }
+    Ok(Gateway {
+        addr: SocketAddr::new(
+            IpAddr::V4(router),
+            url.port_or_known_default().unwrap_or(80),
+        ),
+        root_url: url.path().to_string(),
+        control_url: control.to_string(),
+        control_schema_url: scpd.to_string(),
+        control_schema,
+        service_type,
+        provider: Tokio,
+    })
+}
+
+/// The first WAN connection service, anywhere in the device tree: its type, its
+/// description's URL and its control URL.
+fn wan_service(root: &xmltree::Element) -> Option<(String, String, String)> {
+    let text = |e: &xmltree::Element, name: &str| {
+        e.get_child(name)
+            .and_then(|c| c.get_text())
+            .map(|t| t.trim().to_string())
+    };
+    let elements = |e: &xmltree::Element, list: &str, item: &'static str| {
+        e.get_child(list)
+            .map(|l| {
+                l.children
+                    .iter()
+                    .filter_map(|c| c.as_element())
+                    .filter(|c| c.name == item)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let mut devices: Vec<xmltree::Element> =
+        root.get_child("device").cloned().into_iter().collect();
+    while let Some(device) = devices.pop() {
+        for service in elements(&device, "serviceList", "service") {
+            let kind = text(&service, "serviceType").unwrap_or_default();
+            if [
+                "urn:schemas-upnp-org:service:WANIPConnection:1",
+                "urn:schemas-upnp-org:service:WANIPConnection:2",
+                "urn:schemas-upnp-org:service:WANPPPConnection:1",
+            ]
+            .contains(&kind.as_str())
+                && let (Some(scpd), Some(control)) =
+                    (text(&service, "SCPDURL"), text(&service, "controlURL"))
+                && !control.is_empty()
+            {
+                return Some((kind, scpd, control));
+            }
+        }
+        devices.extend(elements(&device, "deviceList", "device").into_iter().rev());
+    }
+    None
+}
+
+/// Each action of a service's description, with the names of its arguments in.
+fn action_arguments(scpd: &xmltree::Element) -> HashMap<String, Vec<String>> {
+    let children = |e: &xmltree::Element, name: &'static str| {
+        e.children
+            .iter()
+            .filter_map(|c| c.as_element())
+            .filter(move |c| c.name == name)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let text = |e: &xmltree::Element, name: &str| {
+        e.get_child(name)
+            .and_then(|c| c.get_text())
+            .map(|t| t.trim().to_string())
+    };
+    let Some(list) = scpd.get_child("actionList") else {
+        return HashMap::new();
+    };
+    children(list, "action")
+        .iter()
+        .filter_map(|action| {
+            let arguments = action
+                .get_child("argumentList")
+                .map(|l| {
+                    children(l, "argument")
+                        .iter()
+                        .filter(|a| text(a, "direction").as_deref() == Some("in"))
+                        .filter_map(|a| text(a, "name"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((text(action, "name")?, arguments))
+        })
+        .collect()
 }
 
 /// Forwards every port, TCP and UDP, to `ip`.
@@ -669,6 +866,60 @@ fn gateway() -> Option<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_routers_description() {
+        let answer = b"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\n\
+            Location: http://192.168.1.1:5000/rootDesc.xml\r\nST: x\r\n\r\n";
+        assert_eq!(
+            search_location(answer).as_deref(),
+            Some("http://192.168.1.1:5000/rootDesc.xml")
+        );
+        assert_eq!(
+            search_location(b"NOTIFY * HTTP/1.1\r\nLOCATION: http://x/\r\n"),
+            None
+        );
+
+        let root = xmltree::Element::parse(
+            r#"<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device>
+            <deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType>
+            <deviceList><device><deviceType>urn:schemas-upnp-org:device:WANDevice:1</deviceType>
+            <deviceList><device><serviceList><service>
+            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>
+            <controlURL>/ctl/IPConn</controlURL><SCPDURL>/WANIPCn.xml</SCPDURL>
+            </service></serviceList></device></deviceList></device></deviceList></device></root>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            wan_service(&root),
+            Some((
+                "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
+                "/WANIPCn.xml".into(),
+                "/ctl/IPConn".into()
+            ))
+        );
+
+        let scpd = xmltree::Element::parse(
+            r#"<scpd xmlns="urn:schemas-upnp-org:service-1-0"><actionList>
+            <action><name>DeletePortMapping</name><argumentList>
+            <argument><name>NewRemoteHost</name><direction>in</direction></argument>
+            <argument><name>NewExternalPort</name><direction>in</direction></argument>
+            <argument><name>NewProtocol</name><direction>in</direction></argument>
+            </argumentList></action>
+            <action><name>GetExternalIPAddress</name><argumentList>
+            <argument><name>NewExternalIPAddress</name><direction>out</direction></argument>
+            </argumentList></action></actionList></scpd>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let actions = action_arguments(&scpd);
+        assert_eq!(
+            actions["DeletePortMapping"],
+            ["NewRemoteHost", "NewExternalPort", "NewProtocol"]
+        );
+        assert!(actions["GetExternalIPAddress"].is_empty());
+    }
 
     #[test]
     fn reads_whether_the_firewall_opens_the_pool() {
