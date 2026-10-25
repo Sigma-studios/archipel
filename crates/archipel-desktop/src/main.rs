@@ -6,11 +6,13 @@
 //! opened for the UI, so there is no login. Servers run while the app does:
 //! closing it stops them, once confirmed.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use archipel::desktop::{self, Desktop};
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::webview::NewWindowResponse;
+use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 /// archipel, or why it could not start (shown in the window).
@@ -76,6 +78,15 @@ fn main() {
                 .title("archipel")
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(420.0, 500.0)
+                // The UI's outside links (Steam's token page, the Workshop, Modrinth)
+                // open a new tab, which a webview has nowhere to put: they go to
+                // the browser instead.
+                .on_new_window(|url, _| {
+                    if matches!(url.scheme(), "http" | "https") {
+                        std::thread::spawn(move || open_in_browser(&url));
+                    }
+                    NewWindowResponse::Deny
+                })
                 .build()?;
                 let handle = app.handle().clone();
                 let inside = inside.clone();
@@ -146,6 +157,27 @@ fn ask_to_quit(app: &AppHandle, inside: &Shared) {
                 }
             }
         });
+}
+
+/// Through the desktop portal, which reaches the browser from inside the FHS
+/// sandbox, and xdg-open where there's no portal.
+fn open_in_browser(url: &Url) {
+    let portal = zbus::blocking::Connection::session().and_then(|bus| {
+        let options: HashMap<&str, zbus::zvariant::Value> = HashMap::new();
+        bus.call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.OpenURI"),
+            "OpenURI",
+            &("", url.as_str(), options),
+        )
+    });
+    if let Err(e) = portal {
+        tracing::info!("no desktop portal ({e}), trying xdg-open");
+        if let Err(e) = std::process::Command::new("xdg-open").arg(url.as_str()).status() {
+            tracing::warn!("could not open {url}: {e}");
+        }
+    }
 }
 
 /// Stops every server cleanly (Minecraft saves its world), then ends the app.
