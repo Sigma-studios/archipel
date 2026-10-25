@@ -30,6 +30,9 @@ command = [
   "-console",
   "-norestart",
   "-strictportbind",
+  # SourceTV would take port 27020 in every server: two at once, and the
+  # second quits (-strictportbind).
+  "-nohltv",
   "-port", "{port.game}",
   "+clientport", "{port.client}",
   "+maxplayers", "{setting.max_players}",
