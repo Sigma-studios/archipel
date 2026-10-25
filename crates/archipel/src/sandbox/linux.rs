@@ -23,10 +23,26 @@ const IOCTL_DEV: u64 = 1 << 15;
 
 const READ: u64 = EXECUTE | READ_FILE | READ_DIR;
 
-/// What any program needs to read and run.
+/// What any program needs to read and run. `/.host-etc` is NixOS's FHS
+/// environment (nix/): the host's /etc is mounted there, and /etc/ssl/certs,
+/// /etc/resolv.conf and the like are links into it, so without it nothing
+/// verifies a certificate or resolves a name (DepotDownloader can't reach
+/// Steam). Paths that don't exist are skipped.
 const SYSTEM: &[&str] = &[
-    "/usr", "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/etc", "/opt", "/nix", "/run", "/proc",
-    "/sys", "/snap",
+    "/usr",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/bin",
+    "/sbin",
+    "/etc",
+    "/.host-etc",
+    "/opt",
+    "/nix",
+    "/run",
+    "/proc",
+    "/sys",
+    "/snap",
 ];
 
 #[repr(C)]
