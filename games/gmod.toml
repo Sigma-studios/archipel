@@ -21,7 +21,11 @@ help = "Addon files (.gma) of your own, loaded at the next start. Anything on th
 
 [run]
 # srcds_run restarts the server when it crashes, unless -norestart: archipel does.
+# stdbuf: srcds holds its console in a buffer when it writes to a pipe, so
+# without it the ready line below stays there and the server looks stuck
+# starting while it already runs.
 command = [
+  "stdbuf", "-oL", "-eL",
   "./srcds_run_x64",
   "-game", "garrysmod",
   "-console",
