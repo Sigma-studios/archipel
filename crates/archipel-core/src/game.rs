@@ -124,6 +124,11 @@ pub struct RunDef {
     /// counts as running once started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready: Option<String>,
+    /// Its output goes to a terminal rather than a pipe: for programs that hold
+    /// what they print in a buffer when it goes to a pipe (Source servers), which
+    /// would keep the ready line back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tty: bool,
 }
 
 fn default_stop_timeout() -> u32 {

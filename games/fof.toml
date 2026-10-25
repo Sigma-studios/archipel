@@ -2,7 +2,7 @@
 # server from Steam (32-bit only).
 id = "fof"
 name = "Fistful of Frags"
-description = "A free western shooter on the Source engine: duels, teamplay and break bad. The dedicated server comes from Steam (about 3 GB; it is 32-bit, so not on NixOS)."
+description = "A free western shooter on the Source engine: duels, teamplay and break bad. The dedicated server comes from Steam (about 3 GB; it is 32-bit: on NixOS, it runs from archipel's nix/ package)."
 badge = "🤠"
 memory = { min_mb = 512, default_mb = 1024 }
 ports = [
@@ -21,11 +21,10 @@ help = "The game's maps are here too. Add your own .bsp files: they can be picke
 
 [run]
 # srcds_run restarts the server when it crashes, unless -norestart: archipel does.
-# stdbuf: srcds holds its console in a buffer when it writes to a pipe, so
-# without it the ready line below stays there and the server looks stuck
-# starting while it already runs.
+# tty: srcds holds its console in a buffer when it writes to a pipe, so the
+# ready line below would stay there and the server look stuck starting while it
+# already runs. (stdbuf cannot help the 32-bit ones: its library is 64-bit.)
 command = [
-  "stdbuf", "-oL", "-eL",
   "./srcds_run",
   "-game", "fof",
   "-console",
@@ -41,6 +40,7 @@ command = [
 stop_command = "quit"
 stop_timeout_secs = 20
 ready = "Connection to Steam servers successful"
+tty = true
 
 [[settings]]
 key = "hostname"
