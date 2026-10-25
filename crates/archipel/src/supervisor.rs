@@ -550,13 +550,13 @@ impl Supervisor {
             .env("TERM", "dumb")
             .envs(&env)
             .stdin(Stdio::piped());
-        let (tty, tty_out) = if game.run.tty {
+        let (tty, tty_server) = if game.run.tty {
             let (master, slave) = open_tty().context("opening a terminal for it")?;
-            (Some(tokio::fs::File::from_std(master)), Some(slave))
+            (Some(master), Some(slave))
         } else {
             (None, None)
         };
-        let mut child = spawn(cmd, &run_as, tty_out)
+        let mut child = spawn(cmd, &run_as, tty_server)
             .with_context(|| format!("running {}", program.display()))?;
         *inst.pid.lock() = child.id().map(|p| p as i32);
         *inst.spawned.lock() = Some(Instant::now());
@@ -565,10 +565,14 @@ impl Supervisor {
             tokio::spawn(async move { reacher.open(id, ports).await });
         }
 
-        // The console's command line.
+        // The console's command line; with a terminal, typed there.
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         *inst.stdin.lock() = Some(tx);
-        if let Some(mut stdin) = child.stdin.take() {
+        let stdin: Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>> = match &tty {
+            Some(tty) => Some(Box::new(tokio::fs::File::from_std(tty.try_clone()?))),
+            None => child.stdin.take().map(|i| Box::new(i) as _),
+        };
+        if let Some(mut stdin) = stdin {
             tokio::spawn(async move {
                 while let Some(line) = rx.recv().await {
                     if stdin
@@ -588,7 +592,7 @@ impl Supervisor {
         }
         // With a terminal, stdout and stderr both go there.
         let out: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = match tty {
-            Some(tty) => Some(Box::new(tty)),
+            Some(tty) => Some(Box::new(tokio::fs::File::from_std(tty))),
             None => child.stdout.take().map(|o| Box::new(o) as _),
         };
         let readers = pipe_output(out, child.stderr.take(), inst.console.clone(), {
@@ -1024,7 +1028,7 @@ async fn missing_program(program: &Path, dir: &Path, uid: u32) -> String {
 
 /// Spawns `cmd` as the server's user, in its cgroup, in a session of its own
 /// (so signals reach everything it starts); on the desktop, kept to its files.
-/// Its output goes to `tty` when given (the terminal's end for it), to pipes
+/// Its input and output are `tty` when given (the terminal's end for it), pipes
 /// otherwise.
 fn spawn(
     mut cmd: tokio::process::Command,
@@ -1040,7 +1044,10 @@ fn spawn(
     let switch_user = !fsops::servers_run_as_self();
     let sandbox = run_as.sandbox.as_ref().map(|s| s.raw_fd());
     match tty {
-        Some(tty) => cmd.stdout(tty.try_clone()?).stderr(tty),
+        Some(tty) => cmd
+            .stdin(tty.try_clone()?)
+            .stdout(tty.try_clone()?)
+            .stderr(tty),
         None => cmd.stdout(Stdio::piped()).stderr(Stdio::piped()),
     };
     cmd.kill_on_drop(true);
@@ -1100,8 +1107,8 @@ fn spawn(
     })
 }
 
-/// A terminal for a server's output: archipel's end to read, and the server's end
-/// to write to. Raw, so lines end in `\n` alone; it does not become the server's
+/// A terminal for a server: archipel's end, and the server's for its input and
+/// output. Raw, so lines end in `\n` alone and what is typed is not echoed; it does not become the server's
 /// controlling terminal (it has a session of its own, without one).
 fn open_tty() -> std::io::Result<(std::fs::File, OwnedFd)> {
     let (mut master, mut slave) = (-1, -1);
@@ -1396,7 +1403,10 @@ mod tests {
         crate::fsops::run_servers_as_self(None);
         let (master, slave) = open_tty().unwrap();
         let mut cmd = tokio::process::Command::new("sh");
-        cmd.args(["-c", "test -t 1 && test -t 2 && echo one && echo two >&2"]);
+        cmd.args([
+            "-c",
+            "test -t 0 && test -t 1 && test -t 2 && echo one && echo two >&2",
+        ]);
         let run_as = RunAs {
             uid: 0,
             cgroup: None,

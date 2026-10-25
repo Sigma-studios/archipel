@@ -191,7 +191,7 @@ command = ["{base}/mygame-server", "--port", "{port.game}", "--config", "config.
 stop_command = "quit"           # typed into its console; or stop_signal = "SIGINT"
 stop_timeout_secs = 30
 ready = "Server started"        # a log line saying it is up
-tty = false                     # true: output to a terminal, for servers that
+tty = false                     # true: its console is a terminal, for servers that
                                 # hold it back when it goes to a pipe
 
 [[settings]]

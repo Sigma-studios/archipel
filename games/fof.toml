@@ -21,7 +21,7 @@ help = "The game's maps are here too. Add your own .bsp files: they can be picke
 
 [run]
 # srcds_run restarts the server when it crashes, unless -norestart: archipel does.
-# tty: srcds holds its console in a buffer when it writes to a pipe, so the
+# tty: srcds holds its console in a buffer unless it runs in a terminal, so the
 # ready line below would stay there and the server look stuck starting while it
 # already runs. (stdbuf cannot help the 32-bit ones: its library is 64-bit.)
 command = [
