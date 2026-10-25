@@ -9,6 +9,7 @@
 //! unless it keeps crashing.
 
 use std::collections::{BTreeMap, HashMap};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -549,8 +550,14 @@ impl Supervisor {
             .env("TERM", "dumb")
             .envs(&env)
             .stdin(Stdio::piped());
-        let mut child =
-            spawn(cmd, &run_as).with_context(|| format!("running {}", program.display()))?;
+        let (tty, tty_out) = if game.run.tty {
+            let (master, slave) = open_tty().context("opening a terminal for it")?;
+            (Some(tokio::fs::File::from_std(master)), Some(slave))
+        } else {
+            (None, None)
+        };
+        let mut child = spawn(cmd, &run_as, tty_out)
+            .with_context(|| format!("running {}", program.display()))?;
         *inst.pid.lock() = child.id().map(|p| p as i32);
         *inst.spawned.lock() = Some(Instant::now());
         if let Some(reacher) = self.0.reacher.clone() {
@@ -579,28 +586,28 @@ impl Supervisor {
         if ready_text.is_none() {
             inst.set(ServerState::Running, None);
         }
-        let readers = pipe_output(
-            child.stdout.take(),
-            child.stderr.take(),
-            inst.console.clone(),
-            {
-                let status = inst.status.clone();
-                let console = inst.console.clone();
-                move |line: &str| {
-                    if let Some(text) = &ready_text
-                        && line.contains(text.as_str())
-                        && status.borrow().state == ServerState::Starting
-                    {
-                        status.send_modify(|s| {
-                            s.state = ServerState::Running;
-                            s.started_at = Some(archipel_core::now());
-                        });
-                        console.system("ready".into());
-                    }
-                    true
+        // With a terminal, stdout and stderr both go there.
+        let out: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = match tty {
+            Some(tty) => Some(Box::new(tty)),
+            None => child.stdout.take().map(|o| Box::new(o) as _),
+        };
+        let readers = pipe_output(out, child.stderr.take(), inst.console.clone(), {
+            let status = inst.status.clone();
+            let console = inst.console.clone();
+            move |line: &str| {
+                if let Some(text) = &ready_text
+                    && line.contains(text.as_str())
+                    && status.borrow().state == ServerState::Starting
+                {
+                    status.send_modify(|s| {
+                        s.state = ServerState::Running;
+                        s.started_at = Some(archipel_core::now());
+                    });
+                    console.system("ready".into());
                 }
-            },
-        );
+                true
+            }
+        });
         let status = child.wait().await?;
         readers.await;
         Ok(match status.code() {
@@ -1017,9 +1024,12 @@ async fn missing_program(program: &Path, dir: &Path, uid: u32) -> String {
 
 /// Spawns `cmd` as the server's user, in its cgroup, in a session of its own
 /// (so signals reach everything it starts); on the desktop, kept to its files.
+/// Its output goes to `tty` when given (the terminal's end for it), to pipes
+/// otherwise.
 fn spawn(
     mut cmd: tokio::process::Command,
     run_as: &RunAs,
+    tty: Option<OwnedFd>,
 ) -> anyhow::Result<tokio::process::Child> {
     let procs = run_as
         .cgroup
@@ -1029,9 +1039,11 @@ fn spawn(
     let uid = run_as.uid;
     let switch_user = !fsops::servers_run_as_self();
     let sandbox = run_as.sandbox.as_ref().map(|s| s.raw_fd());
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    match tty {
+        Some(tty) => cmd.stdout(tty.try_clone()?).stderr(tty),
+        None => cmd.stdout(Stdio::piped()).stderr(Stdio::piped()),
+    };
+    cmd.kill_on_drop(true);
     // SAFETY: between fork and exec only async-signal-safe calls are made, on data
     // prepared before the fork.
     unsafe {
@@ -1088,14 +1100,49 @@ fn spawn(
     })
 }
 
+/// A terminal for a server's output: archipel's end to read, and the server's end
+/// to write to. Raw, so lines end in `\n` alone; it does not become the server's
+/// controlling terminal (it has a session of its own, without one).
+fn open_tty() -> std::io::Result<(std::fs::File, OwnedFd)> {
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: openpty fills in two descriptors, which are then owned here; termios
+    // is plain data.
+    unsafe {
+        if libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        ) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let (master, slave) = (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave));
+        for fd in [&master, &slave] {
+            // Not for the servers started later: stdout and stderr are dup'ed.
+            libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(slave.as_raw_fd(), &mut t) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::cfmakeraw(&mut t);
+        if libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &t) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((master.into(), slave))
+    }
+}
+
 /// Why `program`, which is there, cannot start: the loader it asks for is not.
 fn loader_missing(program: &Path) -> String {
     let loader = elf_interpreter(program);
     let bits32 = loader.as_deref() == Some("/lib/ld-linux.so.2");
     let fix = if bits32 {
         "It is a 32-bit program: install your system's 32-bit libraries (lib32gcc-s1 and \
-         lib32stdc++6 on Debian and Ubuntu). NixOS has no 32-bit loader there, even with \
-         programs.nix-ld, so 32-bit games do not run on it"
+         lib32stdc++6 on Debian and Ubuntu). On NixOS, programs.nix-ld brings no 32-bit \
+         loader: run archipel from its nix/ package, which has one"
     } else {
         "On NixOS, turn on programs.nix-ld (or open archipel with appimage-run)"
     };
@@ -1153,8 +1200,8 @@ fn elf_interpreter(program: &Path) -> Option<String> {
 /// Copies a child's stdout and stderr into the console, line by line, showing
 /// each to `watch`. The returned future ends with them.
 fn pipe_output(
-    out: Option<tokio::process::ChildStdout>,
-    err: Option<tokio::process::ChildStderr>,
+    out: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+    err: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
     console: Console,
     // Whether to show the line.
     watch: impl Fn(&str) -> bool + Send + Sync + 'static,
@@ -1219,7 +1266,7 @@ pub async fn run_logged_with(
     console: &Console,
     show: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    let mut child = spawn(cmd, run_as)?;
+    let mut child = spawn(cmd, run_as, None)?;
     let readers = pipe_output(
         child.stdout.take(),
         child.stderr.take(),
@@ -1342,5 +1389,28 @@ mod tests {
         );
         assert!(loader_missing(&path).contains("32-bit"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn writes_to_a_terminal_when_given_one() {
+        crate::fsops::run_servers_as_self(None);
+        let (master, slave) = open_tty().unwrap();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "test -t 1 && test -t 2 && echo one && echo two >&2"]);
+        let run_as = RunAs {
+            uid: 0,
+            cgroup: None,
+            sandbox: None,
+        };
+        let mut child = spawn(cmd, &run_as, Some(slave)).unwrap();
+        assert!(child.wait().await.unwrap().success());
+        // Once the server is gone, reading its terminal ends (EIO), after what it
+        // wrote: read as pipe_output does.
+        let mut lines = tokio::io::BufReader::new(tokio::fs::File::from_std(master)).lines();
+        let mut out = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            out.push(line);
+        }
+        assert_eq!(out, ["one", "two"]);
     }
 }

@@ -150,8 +150,8 @@ on `programs.nix-ld`.
 Steam games come through DepotDownloader, a 64-bit program that needs the system's
 OpenSSL (`libssl3` on Debian and Ubuntu; `nix/` includes it); Fistful of Frags's
 server is 32-bit, though, and needs 32-bit libraries (`lib32gcc-s1` and
-`lib32stdc++6` on Debian and Ubuntu), which NixOS cannot provide where it looks for
-them: it does not run there. Source servers also want `libcurl3-gnutls` and
+`lib32stdc++6` on Debian and Ubuntu); on NixOS, `programs.nix-ld` has no 32-bit
+loader, but `nix/` does. Source servers also want `libcurl3-gnutls` and
 `libtinfo5`. Every game but Minecraft needs x86_64.
 
 ## How servers are kept apart
@@ -191,6 +191,8 @@ command = ["{base}/mygame-server", "--port", "{port.game}", "--config", "config.
 stop_command = "quit"           # typed into its console; or stop_signal = "SIGINT"
 stop_timeout_secs = 30
 ready = "Server started"        # a log line saying it is up
+tty = false                     # true: output to a terminal, for servers that
+                                # hold it back when it goes to a pipe
 
 [[settings]]
 key = "name"

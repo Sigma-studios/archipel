@@ -21,11 +21,10 @@ help = "Addon files (.gma) of your own, loaded at the next start. Anything on th
 
 [run]
 # srcds_run restarts the server when it crashes, unless -norestart: archipel does.
-# stdbuf: srcds holds its console in a buffer when it writes to a pipe, so
-# without it the ready line below stays there and the server looks stuck
-# starting while it already runs.
+# tty: srcds holds its console in a buffer when it writes to a pipe, so the
+# ready line below would stay there and the server look stuck starting while it
+# already runs. (stdbuf cannot help the 32-bit ones: its library is 64-bit.)
 command = [
-  "stdbuf", "-oL", "-eL",
   "./srcds_run_x64",
   "-game", "garrysmod",
   "-console",
@@ -42,6 +41,7 @@ command = [
 stop_command = "quit"
 stop_timeout_secs = 20
 ready = "Connection to Steam servers successful"
+tty = true
 
 [[settings]]
 key = "gamemode"
