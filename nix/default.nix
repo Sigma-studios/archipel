@@ -2,9 +2,9 @@
 #
 #   archipel = pkgs.callPackage "${archipel-src}/nix" { rustToolchain = …; };
 #
-# rustToolchain needs the wasm32-unknown-unknown target (rust-overlay's
-# `rust-bin.stable.latest.default.override { targets = [ "wasm32-unknown-unknown" ]; }`
-# for example). Pass `src` to build another checkout than this one.
+# rustToolchain should be the one this repo pins, with rust-overlay's
+# `rust-bin.fromRustupToolchainFile "${archipel-src}/rust-toolchain.toml"`. Pass
+# `src` to build another checkout than this one.
 #
 # The game servers archipel starts are binaries it downloads for usual
 # distributions: an Adoptium JRE (Minecraft), DepotDownloader (Steam games),

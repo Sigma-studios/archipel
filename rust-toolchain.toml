@@ -1,0 +1,7 @@
+# The Rust this project builds with, so that a new release changes nothing until
+# this line does. Nix reads it too (nix/default.nix takes the toolchain as an
+# argument). The UI is compiled to wasm32.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]
