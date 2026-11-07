@@ -768,6 +768,7 @@ fn opening_view(app: &App, reacher: &crate::reach::Reacher, row: &OpeningRow) ->
         name: row.name.clone(),
         ports: row.ports.clone(),
         custom: row.custom,
+        target: row.target,
         open: reacher.is_open(row.id),
         reach,
         created_at: row.created_at,
@@ -777,7 +778,7 @@ fn opening_view(app: &App, reacher: &crate::reach::Reacher, row: &OpeningRow) ->
         // preset changed keeps the plain words.
         setup: preset
             .filter(|p| match p.port {
-                Some(port) => row.ports == [port],
+                Some(port) => row.target == Some(port) || row.ports == [port],
                 None => !row.custom && row.ports.len() == usize::from(p.ports),
             })
             .map(|p| p.setup_for(&row.ports))
@@ -882,7 +883,15 @@ async fn open_opening(
     let row = load_opening(&app, id)?;
     if !reacher.is_open(id) {
         let holder = crate::reach::Holder::Opening(id);
-        reacher.opening(holder, &row.ports);
+        let relay = match (row.target, row.ports.first()) {
+            (Some(target), Some(&port)) => Some(
+                crate::relay::Relay::start(port, target)
+                    .await
+                    .map_err(|e| refused(e.context("starting the relay")))?,
+            ),
+            _ => None,
+        };
+        reacher.opening(holder, &row.ports, relay);
         let (reacher, ports) = (reacher.clone(), row.ports.clone());
         tokio::spawn(async move { reacher.forward_for(holder, ports).await });
     }

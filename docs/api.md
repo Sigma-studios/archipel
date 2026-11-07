@@ -75,7 +75,7 @@ only once that check saw the name lead to this connection (`host`); otherwise
 | `PUT /api/settings` | `Settings` | `Settings`; a change checks again, as `POST /api/internet/check`. `probe_url` is empty or `https://…` (`http://localhost…` for development), `public_host` empty or a hostname |
 | `GET /api/openings` | | `OpeningView[]` (desktop app): ports forwarded for games hosted from the game itself, no server; `reach` while `open`; 404 hosted |
 | `GET /api/openings/presets` | | `HostedGame[]`: games archipel knows how many ports to open for, and what to set in them (`games/hosted/`, and `<data>/games/hosted/`) |
-| `POST /api/openings` | `NewOpening` | `OpeningView`: a `preset` (its ports, its name unless `name` is given); or `count` consecutive ports from the pool (1 to 8, 1 by default) or the game's own `port` (`custom`), not both; 400 if taken. `setup` is the preset's, with the ports filled in |
+| `POST /api/openings` | `NewOpening` | `OpeningView`: a `preset` (its ports, its name unless `name` is given); or `count` consecutive ports from the pool (1 to 8, 1 by default) or the game's own `port`, not both; 400 if taken. A `port` in the pool is taken as it is; outside it, the opening gets a port of the pool that relays to it over TCP while open (`target`). `custom` marks older openings forwarded outside the pool as they were. `setup` is the preset's, with the ports filled in |
 | `POST /api/openings/{id}/open` | | `OpeningView`, `checking` until the router answered; forwarded (TCP and UDP) and renewed until closed or the app closes |
 | `POST /api/openings/{id}/close` | | `OpeningView`; its forwardings taken back |
 | `DELETE /api/openings/{id}` | | 204; closed first, its ports back to the pool |

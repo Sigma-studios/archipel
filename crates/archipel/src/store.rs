@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS openings (
     ports TEXT NOT NULL,
     custom INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    preset TEXT
+    preset TEXT,
+    target INTEGER
 );
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -87,11 +88,16 @@ pub struct OpeningRow {
     pub id: u64,
     pub name: String,
     pub ports: Vec<u16>,
-    /// A port the game would not change, typed in; otherwise taken from the pool.
+    /// A port outside the pool forwarded as it is (made before relays): this
+    /// computer's firewall must let it in, and the check from outside does not
+    /// stand for it.
     pub custom: bool,
     pub created_at: u64,
     /// The hosted game it was made for (`dsp-nebula`), if picked from the list.
     pub preset: Option<String>,
+    /// The game's own port on this computer, outside the pool, that its port
+    /// passes connections on to (see [`crate::relay`]).
+    pub target: Option<u16>,
 }
 
 /// What an opening is created with.
@@ -99,7 +105,8 @@ pub struct OpeningRow {
 pub enum Wanted {
     /// This many consecutive ports from the pool.
     Pool(u16),
-    /// This very port.
+    /// The game's own port: itself if it is in the pool, otherwise a port of the
+    /// pool that passes connections on to it.
     Port(u16),
 }
 
@@ -133,12 +140,14 @@ impl Store {
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )?;
         conn.execute_batch(SCHEMA)?;
-        // Openings made before presets have no column for theirs.
-        let has_preset = conn
-            .prepare("SELECT 1 FROM pragma_table_info('openings') WHERE name = 'preset'")?
-            .exists([])?;
-        if !has_preset {
-            conn.execute_batch("ALTER TABLE openings ADD COLUMN preset TEXT")?;
+        // Openings made before presets, or relays, have no column for them.
+        for (column, kind) in [("preset", "TEXT"), ("target", "INTEGER")] {
+            let has = conn
+                .prepare("SELECT 1 FROM pragma_table_info('openings') WHERE name = ?1")?
+                .exists([column])?;
+            if !has {
+                conn.execute_batch(&format!("ALTER TABLE openings ADD COLUMN {column} {kind}"))?;
+            }
         }
         Ok(Self(Mutex::new(conn)))
     }
@@ -471,11 +480,13 @@ impl Store {
             custom: r.get(3)?,
             created_at: r.get(4)?,
             preset: r.get(5)?,
+            target: r.get(6)?,
         })
     }
 
     /// Stores a new opening with the ports it wants: consecutive ones from the
-    /// pool `first..=last`, or the one typed in, if no server or opening has it.
+    /// pool `first..=last`; or the game's own, if in the pool and no server or
+    /// opening has it, or else one of the pool to relay to it.
     pub fn create_opening(
         &self,
         name: &str,
@@ -486,36 +497,39 @@ impl Store {
         let mut conn = self.0.lock();
         let tx = conn.transaction()?;
         let used = used_ports(&tx)?;
-        let (ports, custom) = match wanted {
-            Wanted::Pool(n) => match free_block(&used, (first, last), n.into()) {
-                Some(start) => (
-                    (start..start + u32::from(n)).map(|p| p as u16).collect(),
-                    false,
-                ),
-                None => bail!(
-                    "no {n} free consecutive ports left in {first}-{last}: delete a server or \
-                     an opening"
-                ),
-            },
-            Wanted::Port(port) if used.contains(&port) => {
+        let block = |n: u16| match free_block(&used, (first, last), n.into()) {
+            Some(start) => Ok((start..start + u32::from(n)).map(|p| p as u16).collect()),
+            None => Err(anyhow::anyhow!(
+                "no {n} free consecutive ports left in {first}-{last}: delete a server or \
+                 an opening"
+            )),
+        };
+        let relayed: Vec<u16> = {
+            let mut stmt = tx.prepare("SELECT target FROM openings WHERE target IS NOT NULL")?;
+            stmt.query_map([], |r| r.get(0))?.flatten().collect()
+        };
+        let (ports, target): (Vec<u16>, Option<u16>) = match wanted {
+            Wanted::Pool(n) => (block(n)?, None),
+            Wanted::Port(port) if used.contains(&port) || relayed.contains(&port) => {
                 bail!("port {port} is already a server's or an opening's")
             }
-            Wanted::Port(port) => (vec![port], true),
+            Wanted::Port(port) if (first..=last).contains(&port) => (vec![port], None),
+            Wanted::Port(port) => (block(1)?, Some(port)),
         };
         tx.execute(
-            "INSERT INTO openings (name, ports, custom, created_at, preset) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO openings (name, ports, custom, created_at, preset, target) \
+             VALUES (?1, ?2, 0, ?3, ?4, ?5)",
             params![
                 name,
                 serde_json::to_string(&ports)?,
-                custom,
                 archipel_core::now(),
-                preset
+                preset,
+                target
             ],
         )?;
         let id = tx.last_insert_rowid();
         let row = tx.query_row(
-            "SELECT id, name, ports, custom, created_at, preset FROM openings WHERE id = ?1",
+            "SELECT id, name, ports, custom, created_at, preset, target FROM openings WHERE id = ?1",
             [id],
             Self::opening_row,
         )?;
@@ -528,7 +542,7 @@ impl Store {
             .0
             .lock()
             .query_row(
-                "SELECT id, name, ports, custom, created_at, preset FROM openings WHERE id = ?1",
+                "SELECT id, name, ports, custom, created_at, preset, target FROM openings WHERE id = ?1",
                 [id],
                 Self::opening_row,
             )
@@ -538,7 +552,7 @@ impl Store {
     pub fn list_openings(&self) -> anyhow::Result<Vec<OpeningRow>> {
         let conn = self.0.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, ports, custom, created_at, preset FROM openings ORDER BY id",
+            "SELECT id, name, ports, custom, created_at, preset, target FROM openings ORDER BY id",
         )?;
         let rows = stmt
             .query_map([], Self::opening_row)?
@@ -686,7 +700,7 @@ mod tests {
         let dsp = store
             .create_opening("dsp", Some("dsp-nebula"), Wanted::Pool(2), pool)
             .unwrap();
-        assert_eq!((dsp.ports.clone(), dsp.custom), (vec![30001, 30002], false));
+        assert_eq!((dsp.ports.clone(), dsp.target), (vec![30001, 30002], None));
         assert_eq!(dsp.preset.as_deref(), Some("dsp-nebula"));
         // A server does not get an opening's port.
         let b = store
@@ -698,24 +712,33 @@ mod tests {
                 .create_opening("more", None, Wanted::Pool(1), pool)
                 .is_err()
         );
-        // A port typed in, outside the pool or not, once.
-        let nebula = store
-            .create_opening("nebula", None, Wanted::Port(8469), pool)
-            .unwrap();
-        assert_eq!((nebula.ports.clone(), nebula.custom), (vec![8469], true));
-        assert!(
-            store
-                .create_opening("again", None, Wanted::Port(8469), pool)
-                .is_err()
-        );
         assert!(
             store
                 .create_opening("taken", None, Wanted::Port(30000), pool)
                 .is_err()
         );
         store.delete_opening(dsp.id).unwrap();
-        assert_eq!(store.list_openings().unwrap().len(), 1);
         assert!(!store.used_ports().unwrap().contains(&30001));
+        // The game's own port, in the pool: itself.
+        let own = store
+            .create_opening("own", None, Wanted::Port(30002), pool)
+            .unwrap();
+        assert_eq!((own.ports.clone(), own.target), (vec![30002], None));
+        // Outside it: a port of the pool, relayed to it; once.
+        let nebula = store
+            .create_opening("nebula", None, Wanted::Port(8469), pool)
+            .unwrap();
+        assert_eq!(
+            (nebula.ports.clone(), nebula.target),
+            (vec![30001], Some(8469))
+        );
+        assert!(!nebula.custom);
+        assert!(
+            store
+                .create_opening("again", None, Wanted::Port(8469), pool)
+                .is_err()
+        );
+        assert_eq!(store.list_openings().unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -735,7 +758,10 @@ mod tests {
             .unwrap();
         let store = Store::open(&path).unwrap();
         let old = &store.list_openings().unwrap()[0];
-        assert_eq!((old.name.as_str(), old.preset.clone()), ("old", None));
+        assert_eq!(
+            (old.name.as_str(), old.preset.clone(), old.target),
+            ("old", None, None)
+        );
         // And again, once it is there.
         drop(store);
         Store::open(&path).unwrap();

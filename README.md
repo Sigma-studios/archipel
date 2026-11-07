@@ -126,8 +126,10 @@ and the same UI, in a window, for the one person using the computer:
   `<data>/games/hosted/`). Or pick "Another game": archipel picks free ports from
   its pool (open in the firewall like the rest, and checked from outside) and you
   set the game to host on the first; or you type the game's own port when it
-  cannot be changed (forwarded the same way, but not checked from outside).
-  Closing the app closes them.
+  cannot be changed, and friends join on a port of the pool that archipel passes
+  on to it (TCP): nothing to open in the firewall, and checked from outside like
+  the rest (the game sees every player come from this PC). Closing the app
+  closes them.
 * **Kept to its files.** Servers run as you, so each is confined with Landlock
   (Linux 5.13 or later) to its own directory, the game files archipel shares and
   the system's: not your home folder, not the other servers. Without Landlock they

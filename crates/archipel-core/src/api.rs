@@ -179,9 +179,14 @@ pub struct OpeningView {
     pub name: String,
     /// Consecutive ports, TCP and UDP each: the game is set to host on the first.
     pub ports: Vec<u16>,
-    /// A port typed in, rather than taken from archipel's pool: the check from
-    /// outside does not stand for it.
+    /// A port outside archipel's pool forwarded as it is (made before relays):
+    /// the firewall here must let it in, and the check from outside does not
+    /// stand for it.
     pub custom: bool,
+    /// The game's own port on this computer, which `ports` passes connections on
+    /// to (TCP), so that it needs no firewall change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u16>,
     /// Forwarded now (switched on until it is switched off or the app closes).
     pub open: bool,
     /// Who can join, while it is open.
@@ -212,7 +217,8 @@ pub struct NewOpening {
     /// How many consecutive ports to take from the pool (1 when neither is given).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u16>,
-    /// The game's own port, when it cannot be changed.
+    /// The game's own port, when it cannot be changed: taken as it is if in the
+    /// pool, otherwise relayed to from a port of the pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 }

@@ -146,7 +146,12 @@ fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl Into
         spawn_local(async move {
             match api::post::<_, OpeningView>("/api/openings", &request).await {
                 Ok(o) => {
-                    toasts().ok(if o.custom {
+                    toasts().ok(if let Some(target) = o.target {
+                        format!(
+                            "{}: friends join on port {}, passed on to the game's {target}",
+                            o.name, o.ports[0]
+                        )
+                    } else if o.custom {
                         format!(
                             "{}: archipel forwards {} when switched on",
                             o.name,
@@ -216,7 +221,7 @@ fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl Into
                 Pick::Nothing => ().into_any(),
                 Pick::Preset(game) => {
                     let ports = match game.port {
-                        Some(p) => format!("archipel forwards the game's port, {p}."),
+                        Some(p) => format!("The game hosts on its own port, {p}: archipel passes one of its own ports on to it, so there's nothing to open in the firewall."),
                         None if game.ports > 1 => format!("archipel picks {} free ports of its own; the card then says what to set in the game.", game.ports),
                         None => "archipel picks a free port of its own; the card then says what to set in the game.".to_string(),
                     };
@@ -246,7 +251,7 @@ fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl Into
                                     <span class="field-label">"Port"</span>
                                     <input type="number" min="1" max="65535" bind:value=port required
                                         placeholder="8469" inputmode="numeric"/>
-                                    <small>"For a game whose port can't be changed. archipel forwards it, but checks from outside only its own ports: it says what your router answered for this one."</small>
+                                    <small>"For a game whose port can't be changed. Friends join on one of archipel's ports, which it passes on to this one (TCP): nothing to open in the firewall, and checked from outside like the rest."</small>
                                 </label>
                             }.into_any()
                         } else {
@@ -308,6 +313,8 @@ fn OpeningCard(opening: Memo<OpeningView>, on_changed: Callback<()>) -> impl Int
         opening.with(|o| {
             if let Some(setup) = &o.setup {
                 setup.clone()
+            } else if let Some(target) = o.target {
+                format!("Your game hosts on its own port, {target}: nothing to change in it.")
             } else if o.custom {
                 format!("Your game's {}, TCP and UDP.", port_list(&o.ports))
             } else if o.ports.len() > 1 {
@@ -338,6 +345,12 @@ fn OpeningCard(opening: Memo<OpeningView>, on_changed: Callback<()>) -> impl Int
                 </span>
             </div>
             <p class="small opening-hint">{hint}</p>
+            {move || opening.with(|o| o.target.map(|target| view! {
+                <p class="small muted">{format!(
+                    "Friends join on port {}, which archipel passes on to the game's {target} (TCP) while open.",
+                    o.ports[0]
+                )}</p>
+            }))}
             {move || if is_open() {
                 view! {
                     <ReachPanel reach=Signal::derive(move || opening.with(|o| reach_of(o.reach.as_ref())))/>

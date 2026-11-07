@@ -87,6 +87,8 @@ struct Entry {
     ports: Vec<u16>,
     via: Option<Via>,
     local_ip: Option<Ipv4Addr>,
+    /// Passing its port on to the game's own, while open (dropped on close).
+    _relay: Option<crate::relay::Relay>,
 }
 
 pub struct Reacher {
@@ -353,13 +355,13 @@ impl Reacher {
     /// Opens a starting server's ports, or an opening's (TCP and UDP each: games
     /// use either or both), and works out who can reach them.
     pub async fn open(&self, holder: Holder, ports: Vec<u16>) {
-        self.opening(holder, &ports);
+        self.opening(holder, &ports, None);
         self.forward_for(holder, ports).await;
     }
 
     /// Says `holder`'s ports are being opened, at once: until [`Self::forward_for`]
-    /// has the router's answer, it is `checking`.
-    pub fn opening(&self, holder: Holder, ports: &[u16]) {
+    /// has the router's answer, it is `checking`. A relay runs until it closes.
+    pub fn opening(&self, holder: Holder, ports: &[u16], relay: Option<crate::relay::Relay>) {
         let local_ip = local_ip();
         self.servers.lock().insert(
             holder,
@@ -373,6 +375,7 @@ impl Reacher {
                 ports: ports.to_vec(),
                 via: None,
                 local_ip,
+                _relay: relay,
             },
         );
     }

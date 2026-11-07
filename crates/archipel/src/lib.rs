@@ -15,6 +15,7 @@ pub mod hooks;
 pub mod install;
 pub mod probe;
 pub mod reach;
+pub mod relay;
 pub mod sandbox;
 pub mod store;
 pub mod supervisor;
