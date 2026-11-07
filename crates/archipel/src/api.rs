@@ -773,7 +773,13 @@ fn opening_view(app: &App, reacher: &crate::reach::Reacher, row: &OpeningRow) ->
         created_at: row.created_at,
         preset: row.preset.clone(),
         badge: preset.map(|p| p.badge.clone()).unwrap_or_default(),
+        // Its setup, for the ports the preset gives now: one made before the
+        // preset changed keeps the plain words.
         setup: preset
+            .filter(|p| match p.port {
+                Some(port) => row.ports == [port],
+                None => !row.custom && row.ports.len() == usize::from(p.ports),
+            })
             .map(|p| p.setup_for(&row.ports))
             .filter(|s| !s.is_empty()),
     }

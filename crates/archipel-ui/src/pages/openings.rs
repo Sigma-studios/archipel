@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api;
-use crate::components::{ErrorNote, ReachPanel};
+use crate::components::{ErrorNote, Modal, ReachPanel};
 use crate::pages::servers::reach_of;
 use crate::util::{polled, toasts};
 
@@ -289,14 +289,11 @@ fn OpeningCard(opening: Memo<OpeningView>, on_changed: Callback<()>) -> impl Int
             busy.try_set(false);
         });
     };
+    // Asked in the page: the desktop app's window has no `confirm()`.
+    let confirm = RwSignal::new(false);
     let delete = move |_| {
         let (id, name) = opening.with_untracked(|o| (o.id, o.name.clone()));
-        let sure = window()
-            .confirm_with_message(&format!("Delete {name}? Its ports go back to archipel."))
-            .unwrap_or(false);
-        if !sure {
-            return;
-        }
+        confirm.set(false);
         spawn_local(async move {
             match api::delete(&format!("/api/openings/{id}")).await {
                 Ok(()) => {
@@ -366,8 +363,23 @@ fn OpeningCard(opening: Memo<OpeningView>, on_changed: Callback<()>) -> impl Int
                         </button>
                     }.into_any()
                 }}
-                <button type="button" class="link-button danger small" on:click=delete>"Delete"</button>
+                <button type="button" class="link-button danger small"
+                    on:click=move |_| confirm.set(true)>"Delete"</button>
             </div>
+            <Modal open=confirm title="Delete these ports?">
+                <p>
+                    <strong>{move || opening.with(|o| o.name.clone())}</strong>
+                    {move || if is_open() {
+                        " is closed on the router and its ports go back to archipel."
+                    } else {
+                        ": its ports go back to archipel."
+                    }}
+                </p>
+                <div class="form-actions">
+                    <button type="button" class="button" on:click=move |_| confirm.set(false)>"Keep it"</button>
+                    <button type="button" class="button button-danger" on:click=delete>"Delete"</button>
+                </div>
+            </Modal>
         </article>
     }
 }
