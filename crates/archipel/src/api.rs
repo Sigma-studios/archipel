@@ -86,6 +86,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/internet/check", post(check_internet))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/openings", get(list_openings).post(create_opening))
+        .route("/api/openings/presets", get(opening_presets))
         .route("/api/openings/{id}", axum::routing::delete(delete_opening))
         .route("/api/openings/{id}/open", post(open_opening))
         .route("/api/openings/{id}/close", post(close_opening))
@@ -754,6 +755,7 @@ const MAX_OPENING_PORTS: u16 = 8;
 
 fn opening_view(app: &App, reacher: &crate::reach::Reacher, row: &OpeningRow) -> OpeningView {
     let first = row.ports.first().copied().unwrap_or_default();
+    let preset = row.preset.as_deref().and_then(|id| app.games.hosted(id));
     let reach = reacher
         .status(crate::reach::Holder::Opening(row.id))
         .map(|status| {
@@ -769,6 +771,11 @@ fn opening_view(app: &App, reacher: &crate::reach::Reacher, row: &OpeningRow) ->
         open: reacher.is_open(row.id),
         reach,
         created_at: row.created_at,
+        preset: row.preset.clone(),
+        badge: preset.map(|p| p.badge.clone()).unwrap_or_default(),
+        setup: preset
+            .map(|p| p.setup_for(&row.ports))
+            .filter(|s| !s.is_empty()),
     }
 }
 
@@ -796,17 +803,43 @@ async fn list_openings(State(app): S, _: Caller) -> ApiResult<Json<Vec<OpeningVi
     ))
 }
 
+/// Games hosted from the game itself that archipel knows how many ports to open
+/// for, and how to set up.
+async fn opening_presets(
+    State(app): S,
+    _: Caller,
+) -> ApiResult<Json<Vec<archipel_core::game::HostedGame>>> {
+    reacher_of(&app)?;
+    Ok(Json(app.games.list_hosted()))
+}
+
 async fn create_opening(
     State(app): S,
     _: Caller,
     Json(req): Json<NewOpening>,
 ) -> ApiResult<Json<OpeningView>> {
     let reacher = reacher_of(&app)?;
-    let name = req.name.trim();
+    let preset = match &req.preset {
+        Some(id) => Some(
+            app.games
+                .hosted(id)
+                .ok_or_else(|| bad(format!("no hosted game {id}")))?,
+        ),
+        None => None,
+    };
+    let name = match (req.name.trim(), preset) {
+        ("", Some(p)) => p.name.as_str(),
+        (name, _) => name,
+    };
     if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
         return Err(bad("a name has 1 to 40 characters"));
     }
-    let wanted = match (req.port, req.count) {
+    // A preset says how many ports, unless given otherwise.
+    let (port, count) = match (req.port, req.count, preset) {
+        (None, None, Some(p)) => (p.port, p.port.is_none().then_some(p.ports)),
+        (port, count, _) => (port, count),
+    };
+    let wanted = match (port, count) {
         (Some(_), Some(_)) => return Err(bad("give a number of ports or a port, not both")),
         (Some(0), _) => return Err(bad("a port is 1 to 65535")),
         (Some(port), None) => crate::store::Wanted::Port(port),
@@ -817,7 +850,7 @@ async fn create_opening(
     };
     let row = app
         .store
-        .create_opening(name, wanted, app.cfg.port_range()?)
+        .create_opening(name, req.preset.as_deref(), wanted, app.cfg.port_range()?)
         .map_err(|e| bad(format!("{e:#}")))?;
     info!(opening = row.id, ports = ?row.ports, "created opening {}", row.name);
     Ok(Json(opening_view(&app, reacher, &row)))

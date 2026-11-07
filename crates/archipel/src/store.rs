@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS openings (
     name TEXT NOT NULL,
     ports TEXT NOT NULL,
     custom INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    preset TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -89,6 +90,8 @@ pub struct OpeningRow {
     /// A port the game would not change, typed in; otherwise taken from the pool.
     pub custom: bool,
     pub created_at: u64,
+    /// The hosted game it was made for (`dsp-nebula`), if picked from the list.
+    pub preset: Option<String>,
 }
 
 /// What an opening is created with.
@@ -130,6 +133,13 @@ impl Store {
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        // Openings made before presets have no column for theirs.
+        let has_preset = conn
+            .prepare("SELECT 1 FROM pragma_table_info('openings') WHERE name = 'preset'")?
+            .exists([])?;
+        if !has_preset {
+            conn.execute_batch("ALTER TABLE openings ADD COLUMN preset TEXT")?;
+        }
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -460,6 +470,7 @@ impl Store {
             ports: serde_json::from_str(&ports).unwrap_or_default(),
             custom: r.get(3)?,
             created_at: r.get(4)?,
+            preset: r.get(5)?,
         })
     }
 
@@ -468,6 +479,7 @@ impl Store {
     pub fn create_opening(
         &self,
         name: &str,
+        preset: Option<&str>,
         wanted: Wanted,
         (first, last): (u16, u16),
     ) -> anyhow::Result<OpeningRow> {
@@ -491,17 +503,19 @@ impl Store {
             Wanted::Port(port) => (vec![port], true),
         };
         tx.execute(
-            "INSERT INTO openings (name, ports, custom, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO openings (name, ports, custom, created_at, preset) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 name,
                 serde_json::to_string(&ports)?,
                 custom,
-                archipel_core::now()
+                archipel_core::now(),
+                preset
             ],
         )?;
         let id = tx.last_insert_rowid();
         let row = tx.query_row(
-            "SELECT id, name, ports, custom, created_at FROM openings WHERE id = ?1",
+            "SELECT id, name, ports, custom, created_at, preset FROM openings WHERE id = ?1",
             [id],
             Self::opening_row,
         )?;
@@ -514,7 +528,7 @@ impl Store {
             .0
             .lock()
             .query_row(
-                "SELECT id, name, ports, custom, created_at FROM openings WHERE id = ?1",
+                "SELECT id, name, ports, custom, created_at, preset FROM openings WHERE id = ?1",
                 [id],
                 Self::opening_row,
             )
@@ -523,8 +537,9 @@ impl Store {
 
     pub fn list_openings(&self) -> anyhow::Result<Vec<OpeningRow>> {
         let conn = self.0.lock();
-        let mut stmt =
-            conn.prepare("SELECT id, name, ports, custom, created_at FROM openings ORDER BY id")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, ports, custom, created_at, preset FROM openings ORDER BY id",
+        )?;
         let rows = stmt
             .query_map([], Self::opening_row)?
             .collect::<Result<_, _>>()?;
@@ -668,32 +683,62 @@ mod tests {
             .create_server(&server(me.id, "a", "minecraft", &empty, &game), pool)
             .unwrap();
         assert_eq!(a.ports["game"], 30000);
-        let dsp = store.create_opening("dsp", Wanted::Pool(2), pool).unwrap();
+        let dsp = store
+            .create_opening("dsp", Some("dsp-nebula"), Wanted::Pool(2), pool)
+            .unwrap();
         assert_eq!((dsp.ports.clone(), dsp.custom), (vec![30001, 30002], false));
+        assert_eq!(dsp.preset.as_deref(), Some("dsp-nebula"));
         // A server does not get an opening's port.
         let b = store
             .create_server(&server(me.id, "b", "minecraft", &empty, &game), pool)
             .unwrap();
         assert_eq!(b.ports["game"], 30003);
-        assert!(store.create_opening("more", Wanted::Pool(1), pool).is_err());
+        assert!(
+            store
+                .create_opening("more", None, Wanted::Pool(1), pool)
+                .is_err()
+        );
         // A port typed in, outside the pool or not, once.
         let nebula = store
-            .create_opening("nebula", Wanted::Port(8469), pool)
+            .create_opening("nebula", None, Wanted::Port(8469), pool)
             .unwrap();
         assert_eq!((nebula.ports.clone(), nebula.custom), (vec![8469], true));
         assert!(
             store
-                .create_opening("again", Wanted::Port(8469), pool)
+                .create_opening("again", None, Wanted::Port(8469), pool)
                 .is_err()
         );
         assert!(
             store
-                .create_opening("taken", Wanted::Port(30000), pool)
+                .create_opening("taken", None, Wanted::Port(30000), pool)
                 .is_err()
         );
         store.delete_opening(dsp.id).unwrap();
         assert_eq!(store.list_openings().unwrap().len(), 1);
         assert!(!store.used_ports().unwrap().contains(&30001));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn adds_the_preset_column_to_older_openings() {
+        let dir = std::env::temp_dir().join(format!("archipel-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE openings (id INTEGER PRIMARY KEY, name TEXT NOT NULL, \
+                 ports TEXT NOT NULL, custom INTEGER NOT NULL, created_at INTEGER NOT NULL);
+                 INSERT INTO openings (name, ports, custom, created_at) \
+                 VALUES ('old', '[30000]', 0, 1);",
+            )
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        let old = &store.list_openings().unwrap()[0];
+        assert_eq!((old.name.as_str(), old.preset.clone()), ("old", None));
+        // And again, once it is there.
+        drop(store);
+        Store::open(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

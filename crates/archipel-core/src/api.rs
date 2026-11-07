@@ -188,13 +188,27 @@ pub struct OpeningView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<Reach>,
     pub created_at: u64,
+    /// The hosted game it was made for (`dsp-nebula`), if picked from the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Its game's badge, from the preset.
+    #[serde(default)]
+    pub badge: String,
+    /// What to set in the game for these ports, from the preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
 }
 
-/// `POST /api/openings`: a name, and either a number of ports from the pool or
-/// one port of the game's.
+/// `POST /api/openings`: a game from `GET /api/openings/presets`, which says how
+/// many ports; or a name, and either a number of ports from the pool or one port
+/// of the game's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewOpening {
+    /// Its name; empty with a preset: the preset's.
+    #[serde(default)]
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// How many consecutive ports to take from the pool (1 when neither is given).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u16>,

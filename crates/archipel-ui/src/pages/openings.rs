@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use archipel_core::api::{NewOpening, OpeningView};
+use archipel_core::game::HostedGame;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -79,8 +80,20 @@ pub fn Openings() -> impl IntoView {
     }
 }
 
+/// What the form is for: a game archipel knows, or any other.
+#[derive(Clone, PartialEq)]
+enum Pick {
+    Nothing,
+    Preset(HostedGame),
+    Other,
+}
+
 #[component]
 fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl IntoView {
+    let presets = polled(None, || async {
+        api::get::<Vec<HostedGame>>("/api/openings/presets").await
+    });
+    let pick = RwSignal::new(Pick::Nothing);
     let name = RwSignal::new(String::new());
     // From archipel's pool, or the game's own port.
     let own_port = RwSignal::new(false);
@@ -91,22 +104,34 @@ fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl Into
 
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        let request = if own_port.get_untracked() {
-            match port.get_untracked().trim().parse::<u16>() {
-                Ok(p) if p > 0 => NewOpening {
-                    name: name.get_untracked(),
-                    count: None,
-                    port: Some(p),
-                },
-                _ => {
-                    error.set(Some("A port is a number from 1 to 65535.".into()));
-                    return;
+        let name = name.get_untracked();
+        let request = match pick.get_untracked() {
+            Pick::Nothing => return,
+            // The preset says how many ports; its name unless another is typed.
+            Pick::Preset(game) => NewOpening {
+                name,
+                preset: Some(game.id),
+                count: None,
+                port: None,
+            },
+            Pick::Other if own_port.get_untracked() => {
+                match port.get_untracked().trim().parse::<u16>() {
+                    Ok(p) if p > 0 => NewOpening {
+                        name,
+                        preset: None,
+                        count: None,
+                        port: Some(p),
+                    },
+                    _ => {
+                        error.set(Some("A port is a number from 1 to 65535.".into()));
+                        return;
+                    }
                 }
             }
-        } else {
-            match count.get_untracked().trim().parse::<u16>() {
+            Pick::Other => match count.get_untracked().trim().parse::<u16>() {
                 Ok(n) if (1..=MAX_PORTS).contains(&n) => NewOpening {
-                    name: name.get_untracked(),
+                    name,
+                    preset: None,
                     count: Some(n),
                     port: None,
                 },
@@ -114,7 +139,7 @@ fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl Into
                     error.set(Some(format!("From 1 to {MAX_PORTS} ports.")));
                     return;
                 }
-            }
+            },
         };
         busy.set(true);
         error.set(None);
@@ -150,44 +175,98 @@ fn NewOpeningForm(adding: RwSignal<bool>, on_changed: Callback<()>) -> impl Into
             </button>
         }
     };
+    let choice = move |this: Pick, badge: String, title: String, desc: String| {
+        let chosen = {
+            let this = this.clone();
+            move || pick.with(|p| *p == this)
+        };
+        let chosen_class = chosen.clone();
+        view! {
+            <button type="button" role="radio"
+                class=move || if chosen_class() { "game-card opening-choice chosen" } else { "game-card opening-choice" }
+                aria-checked=move || chosen().to_string()
+                on:click=move |_| { pick.set(this.clone()); error.set(None); }>
+                <span class="game-badge game-badge-sm" aria-hidden="true">{badge}</span>
+                <span>
+                    <span class="game-card-name">{title}</span>
+                    <span class="game-card-desc">{desc}</span>
+                </span>
+            </button>
+        }
+    };
 
     view! {
         <form class="card opening-form" on:submit=submit>
-            <label class="field">
-                <span class="field-label">"Name"</span>
-                <input type="text" bind:value=name required maxlength="40"
-                    placeholder="Dyson Sphere Program with friends"/>
-            </label>
             <div class="field">
-                <span class="field-label" id="opening-ports-label">"Ports"</span>
-                <div class="segmented" role="radiogroup" aria-labelledby="opening-ports-label">
-                    {segment(false, "Pick them for me")}
-                    {segment(true, "The game's own port")}
+                <span class="field-label" id="opening-game-label">"Game"</span>
+                <div class="opening-choices" role="radiogroup" aria-labelledby="opening-game-label">
+                    {move || presets.data.get().unwrap_or_default().into_iter().map(|g| {
+                        let (badge, title, desc) = (g.badge.clone(), g.name.clone(), g.description.clone());
+                        choice(Pick::Preset(g), badge, title, desc)
+                    }).collect_view()}
+                    {choice(
+                        Pick::Other,
+                        "🎮".into(),
+                        "Another game".into(),
+                        "Not in this list: say how many ports, or the game's own.".into(),
+                    )}
                 </div>
-                {move || if own_port.get() {
-                    view! {
-                        <label class="field">
-                            <span class="field-label">"Port"</span>
-                            <input type="number" min="1" max="65535" bind:value=port required
-                                placeholder="8469" inputmode="numeric"/>
-                            <small>"For a game whose port can't be changed. archipel forwards it, but checks from outside only its own ports: it says what your router answered for this one."</small>
-                        </label>
-                    }.into_any()
-                } else {
-                    view! {
-                        <label class="field">
-                            <span class="field-label">"How many"</span>
-                            <input type="number" min="1" max=MAX_PORTS.to_string() bind:value=count required
-                                inputmode="numeric"/>
-                            <small>"archipel picks free ports from its own, already open in this PC's firewall and checked from outside; then set your game to host on the first one. Most games need one."</small>
-                        </label>
-                    }.into_any()
-                }}
             </div>
+            {move || match pick.get() {
+                Pick::Nothing => ().into_any(),
+                Pick::Preset(game) => {
+                    let ports = match game.port {
+                        Some(p) => format!("archipel forwards the game's port, {p}."),
+                        None if game.ports > 1 => format!("archipel picks {} free ports of its own; the card then says what to set in the game.", game.ports),
+                        None => "archipel picks a free port of its own; the card then says what to set in the game.".to_string(),
+                    };
+                    view! {
+                        <label class="field">
+                            <span class="field-label">"Name"</span>
+                            <input type="text" bind:value=name maxlength="40" placeholder=game.name.clone()/>
+                            <small>{ports}</small>
+                        </label>
+                    }.into_any()
+                }
+                Pick::Other => view! {
+                    <label class="field">
+                        <span class="field-label">"Name"</span>
+                        <input type="text" bind:value=name required maxlength="40"
+                            placeholder="The game you host"/>
+                    </label>
+                    <div class="field">
+                        <span class="field-label" id="opening-ports-label">"Ports"</span>
+                        <div class="segmented" role="radiogroup" aria-labelledby="opening-ports-label">
+                            {segment(false, "Pick them for me")}
+                            {segment(true, "The game's own port")}
+                        </div>
+                        {move || if own_port.get() {
+                            view! {
+                                <label class="field">
+                                    <span class="field-label">"Port"</span>
+                                    <input type="number" min="1" max="65535" bind:value=port required
+                                        placeholder="8469" inputmode="numeric"/>
+                                    <small>"For a game whose port can't be changed. archipel forwards it, but checks from outside only its own ports: it says what your router answered for this one."</small>
+                                </label>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <label class="field">
+                                    <span class="field-label">"How many"</span>
+                                    <input type="number" min="1" max=MAX_PORTS.to_string() bind:value=count required
+                                        inputmode="numeric"/>
+                                    <small>"archipel picks free ports from its own, already open in this PC's firewall and checked from outside; then set your game to host on the first one. Most games need one."</small>
+                                </label>
+                            }.into_any()
+                        }}
+                    </div>
+                }.into_any(),
+            }}
             <ErrorNote error=error/>
             <div class="form-actions">
                 <button type="button" class="button" on:click=move |_| adding.set(false)>"Cancel"</button>
-                <button type="submit" class="button button-primary" disabled=busy>
+                <button type="submit" class="button button-primary"
+                    disabled=move || busy.get() || pick.with(|p| *p == Pick::Nothing)>
                     {move || if busy.get() { "Adding…" } else { "Add" }}
                 </button>
             </div>
@@ -230,7 +309,9 @@ fn OpeningCard(opening: Memo<OpeningView>, on_changed: Callback<()>) -> impl Int
     };
     let hint = move || {
         opening.with(|o| {
-            if o.custom {
+            if let Some(setup) = &o.setup {
+                setup.clone()
+            } else if o.custom {
                 format!("Your game's {}, TCP and UDP.", port_list(&o.ports))
             } else if o.ports.len() > 1 {
                 format!(
@@ -250,13 +331,16 @@ fn OpeningCard(opening: Memo<OpeningView>, on_changed: Callback<()>) -> impl Int
     view! {
         <article class=move || if is_open() { "card opening-card running" } else { "card opening-card" }>
             <div class="opening-title">
+                <span class="game-badge game-badge-sm" aria-hidden="true">
+                    {move || opening.with(|o| if o.badge.is_empty() { "🎮".to_string() } else { o.badge.clone() })}
+                </span>
                 <h3 class="opening-name">{move || opening.with(|o| o.name.clone())}</h3>
                 <span class=move || if is_open() { "badge badge-good" } else { "badge badge-neutral" }>
                     <span class="badge-icon" aria-hidden="true">{move || if is_open() { "●" } else { "■" }}</span>
                     {move || if is_open() { "open" } else { "closed" }}
                 </span>
             </div>
-            <p class="small">{hint}</p>
+            <p class="small opening-hint">{hint}</p>
             {move || if is_open() {
                 view! {
                     <ReachPanel reach=Signal::derive(move || opening.with(|o| reach_of(o.reach.as_ref())))/>

@@ -833,3 +833,68 @@ mod shipped {
         assert!(count >= 6);
     }
 }
+
+/// A game hosted from the game itself (a mod's multiplayer, a game's own "Host"
+/// button), whose ports the desktop app opens on the router: no server to run,
+/// only how many ports and how to set the game up (`games/hosted/*.toml`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostedGame {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub badge: String,
+    /// How many consecutive ports it takes from the pool.
+    #[serde(default = "one")]
+    pub ports: u16,
+    /// Its own port instead, when the game cannot be told another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// What to set in the game, with `{port}` (the first port) and `{ports}`
+    /// (`30005-30006`, or the one port) filled in.
+    #[serde(default)]
+    pub setup: String,
+}
+
+fn one() -> u16 {
+    1
+}
+
+impl HostedGame {
+    pub fn validate(&self) -> Result<(), String> {
+        let word = !self.id.is_empty()
+            && self
+                .id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if !word {
+            return Err(format!(
+                "id `{}` must be lowercase letters, digits and dashes",
+                self.id
+            ));
+        }
+        if self.name.trim().is_empty() || self.name.chars().count() > 40 {
+            return Err(format!("{}: a name has 1 to 40 characters", self.id));
+        }
+        if !(1..=8).contains(&self.ports) {
+            return Err(format!("{}: ports is 1 to 8", self.id));
+        }
+        if self.port == Some(0) {
+            return Err(format!("{}: port is 1 to 65535", self.id));
+        }
+        Ok(())
+    }
+
+    /// Its setup, for these ports.
+    pub fn setup_for(&self, ports: &[u16]) -> String {
+        let first = ports.first().copied().unwrap_or_default();
+        let range = match ports.last() {
+            Some(last) if *last != first => format!("{first}-{last}"),
+            _ => first.to_string(),
+        };
+        self.setup
+            .replace("{port}", &first.to_string())
+            .replace("{ports}", &range)
+    }
+}

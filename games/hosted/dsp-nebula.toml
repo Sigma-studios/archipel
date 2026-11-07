@@ -1,0 +1,8 @@
+# Dyson Sphere Program with the Nebula multiplayer mod: the host plays and hosts
+# from the game itself, on one TCP port (WebSockets), 8469 unless changed.
+id = "dsp-nebula"
+name = "Dyson Sphere Program"
+description = "With the Nebula multiplayer mod: you host from the game itself."
+badge = "🌌"
+ports = 1
+setup = "In the game's Settings, Multiplayer tab, set Host Port to {port}. Then host from the main menu's Multiplayer button."

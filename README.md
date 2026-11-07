@@ -121,10 +121,13 @@ and the same UI, in a window, for the one person using the computer:
 * **Games you host yourself.** For a game hosted from the game itself rather than
   as a server (a mod's multiplayer, such as Nebula for Dyson Sphere Program, or a
   game's own "Host" button), the home page opens ports on the router while you
-  switch them on: archipel picks free ones from its pool (open in the firewall
-  like the rest, and checked from outside) and you set the game to host on the
-  first; or you type the game's own port when it cannot be changed (forwarded the
-  same way, but not checked from outside). Closing the app closes them.
+  switch them on. Pick the game from a list, and its card says what to set in it
+  (a file in `games/hosted/` each, such as `dsp-nebula.toml`; more can go in
+  `<data>/games/hosted/`). Or pick "Another game": archipel picks free ports from
+  its pool (open in the firewall like the rest, and checked from outside) and you
+  set the game to host on the first; or you type the game's own port when it
+  cannot be changed (forwarded the same way, but not checked from outside).
+  Closing the app closes them.
 * **Kept to its files.** Servers run as you, so each is confined with Landlock
   (Linux 5.13 or later) to its own directory, the game files archipel shares and
   the system's: not your home folder, not the other servers. Without Landlock they
