@@ -367,7 +367,7 @@ impl Supervisor {
                 self.0.cgroups.remove(&procs).await;
             }
             if let Some(reacher) = &self.0.reacher {
-                reacher.close(inst.id).await;
+                reacher.close(crate::reach::Holder::Server(inst.id)).await;
             }
             if inst.stopping.load(Ordering::Relaxed) {
                 inst.console.system("stopped".into());
@@ -562,7 +562,9 @@ impl Supervisor {
         *inst.spawned.lock() = Some(Instant::now());
         if let Some(reacher) = self.0.reacher.clone() {
             let ports: Vec<u16> = row.ports.values().copied().collect();
-            tokio::spawn(async move { reacher.open(id, ports).await });
+            tokio::spawn(
+                async move { reacher.open(crate::reach::Holder::Server(id), ports).await },
+            );
         }
 
         // The console's command line; with a terminal, typed there.

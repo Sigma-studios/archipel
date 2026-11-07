@@ -1,4 +1,4 @@
-//! SQLite persistence: users, sessions, servers, the desktop's settings. One mutex-guarded connection:
+//! SQLite persistence: users, sessions, servers, the desktop's openings and settings. One mutex-guarded connection:
 //! queries are tiny.
 
 use std::collections::BTreeMap;
@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS servers (
     installed TEXT,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS openings (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    ports TEXT NOT NULL,
+    custom INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -70,6 +77,27 @@ pub struct ServerRow {
     /// reinstalls them.
     pub installed: Option<String>,
     pub created_at: u64,
+}
+
+/// Ports the desktop opens on the router for a game hosted from the game itself
+/// (a mod's multiplayer, a game's own "host" button): no server, only ports.
+#[derive(Debug, Clone)]
+pub struct OpeningRow {
+    pub id: u64,
+    pub name: String,
+    pub ports: Vec<u16>,
+    /// A port the game would not change, typed in; otherwise taken from the pool.
+    pub custom: bool,
+    pub created_at: u64,
+}
+
+/// What an opening is created with.
+#[derive(Debug, Clone, Copy)]
+pub enum Wanted {
+    /// This many consecutive ports from the pool.
+    Pool(u16),
+    /// This very port.
+    Port(u16),
 }
 
 /// What a server is created with.
@@ -318,20 +346,9 @@ impl Store {
         } = *new;
         let mut conn = self.0.lock();
         let tx = conn.transaction()?;
-        let used: Vec<u16> = {
-            let mut stmt = tx.prepare("SELECT ports FROM servers")?;
-            stmt.query_map([], |r| r.get::<_, String>(0))?
-                .flatten()
-                .flat_map(|p| {
-                    serde_json::from_str::<BTreeMap<String, u16>>(&p)
-                        .unwrap_or_default()
-                        .into_values()
-                })
-                .collect()
-        };
+        let used = used_ports(&tx)?;
         let needed = port_names.len() as u32;
-        let start = (u32::from(first)..=u32::from(last) + 1 - needed.max(1))
-            .find(|&p| (p..p + needed).all(|q| !used.contains(&(q as u16))));
+        let start = free_block(&used, (first, last), needed);
         let ports: BTreeMap<String, u16> = match (needed, start) {
             (0, _) => BTreeMap::new(),
             (_, Some(start)) => port_names
@@ -428,6 +445,99 @@ impl Store {
         Ok(())
     }
 
+    /// Every port a server or an opening has.
+    pub fn used_ports(&self) -> anyhow::Result<std::collections::HashSet<u16>> {
+        used_ports(&self.0.lock())
+    }
+
+    // ---- openings
+
+    fn opening_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OpeningRow> {
+        let ports: String = r.get(2)?;
+        Ok(OpeningRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            ports: serde_json::from_str(&ports).unwrap_or_default(),
+            custom: r.get(3)?,
+            created_at: r.get(4)?,
+        })
+    }
+
+    /// Stores a new opening with the ports it wants: consecutive ones from the
+    /// pool `first..=last`, or the one typed in, if no server or opening has it.
+    pub fn create_opening(
+        &self,
+        name: &str,
+        wanted: Wanted,
+        (first, last): (u16, u16),
+    ) -> anyhow::Result<OpeningRow> {
+        let mut conn = self.0.lock();
+        let tx = conn.transaction()?;
+        let used = used_ports(&tx)?;
+        let (ports, custom) = match wanted {
+            Wanted::Pool(n) => match free_block(&used, (first, last), n.into()) {
+                Some(start) => (
+                    (start..start + u32::from(n)).map(|p| p as u16).collect(),
+                    false,
+                ),
+                None => bail!(
+                    "no {n} free consecutive ports left in {first}-{last}: delete a server or \
+                     an opening"
+                ),
+            },
+            Wanted::Port(port) if used.contains(&port) => {
+                bail!("port {port} is already a server's or an opening's")
+            }
+            Wanted::Port(port) => (vec![port], true),
+        };
+        tx.execute(
+            "INSERT INTO openings (name, ports, custom, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                name,
+                serde_json::to_string(&ports)?,
+                custom,
+                archipel_core::now()
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        let row = tx.query_row(
+            "SELECT id, name, ports, custom, created_at FROM openings WHERE id = ?1",
+            [id],
+            Self::opening_row,
+        )?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    pub fn get_opening(&self, id: u64) -> anyhow::Result<Option<OpeningRow>> {
+        Ok(self
+            .0
+            .lock()
+            .query_row(
+                "SELECT id, name, ports, custom, created_at FROM openings WHERE id = ?1",
+                [id],
+                Self::opening_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_openings(&self) -> anyhow::Result<Vec<OpeningRow>> {
+        let conn = self.0.lock();
+        let mut stmt =
+            conn.prepare("SELECT id, name, ports, custom, created_at FROM openings ORDER BY id")?;
+        let rows = stmt
+            .query_map([], Self::opening_row)?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_opening(&self, id: u64) -> anyhow::Result<()> {
+        self.0
+            .lock()
+            .execute("DELETE FROM openings WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     // ---- settings
 
     /// A setting, if set.
@@ -454,6 +564,34 @@ impl Store {
         };
         Ok(())
     }
+}
+
+/// Every port a server or an opening has.
+fn used_ports(conn: &Connection) -> anyhow::Result<std::collections::HashSet<u16>> {
+    let mut used = std::collections::HashSet::new();
+    let mut stmt = conn.prepare("SELECT ports FROM servers")?;
+    for ports in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
+        used.extend(
+            serde_json::from_str::<BTreeMap<String, u16>>(&ports)
+                .unwrap_or_default()
+                .into_values(),
+        );
+    }
+    let mut stmt = conn.prepare("SELECT ports FROM openings")?;
+    for ports in stmt.query_map([], |r| r.get::<_, String>(0))?.flatten() {
+        used.extend(serde_json::from_str::<Vec<u16>>(&ports).unwrap_or_default());
+    }
+    Ok(used)
+}
+
+/// The first of `needed` consecutive ports of the pool none of which is used.
+fn free_block(
+    used: &std::collections::HashSet<u16>,
+    (first, last): (u16, u16),
+    needed: u32,
+) -> Option<u32> {
+    (u32::from(first)..=(u32::from(last) + 1).checked_sub(needed.max(1))?)
+        .find(|&p| (p..p + needed).all(|q| !used.contains(&(q as u16))))
 }
 
 #[cfg(test)]
@@ -511,6 +649,51 @@ mod tests {
                 .create_server(&new(alice.id, "d", "puck", &two), pool)
                 .is_err()
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn openings_and_servers_share_the_pool() {
+        let dir = std::env::temp_dir().join(format!("archipel-openings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("test.db")).unwrap();
+        store
+            .create_user("me", "x", Role::User, &Quota::default())
+            .unwrap();
+        let me = store.user_by_name("me").unwrap().unwrap();
+        let pool = (30000, 30003);
+        let game = vec!["game".to_string()];
+        let empty = BTreeMap::new();
+        let a = store
+            .create_server(&server(me.id, "a", "minecraft", &empty, &game), pool)
+            .unwrap();
+        assert_eq!(a.ports["game"], 30000);
+        let dsp = store.create_opening("dsp", Wanted::Pool(2), pool).unwrap();
+        assert_eq!((dsp.ports.clone(), dsp.custom), (vec![30001, 30002], false));
+        // A server does not get an opening's port.
+        let b = store
+            .create_server(&server(me.id, "b", "minecraft", &empty, &game), pool)
+            .unwrap();
+        assert_eq!(b.ports["game"], 30003);
+        assert!(store.create_opening("more", Wanted::Pool(1), pool).is_err());
+        // A port typed in, outside the pool or not, once.
+        let nebula = store
+            .create_opening("nebula", Wanted::Port(8469), pool)
+            .unwrap();
+        assert_eq!((nebula.ports.clone(), nebula.custom), (vec![8469], true));
+        assert!(
+            store
+                .create_opening("again", Wanted::Port(8469), pool)
+                .is_err()
+        );
+        assert!(
+            store
+                .create_opening("taken", Wanted::Port(30000), pool)
+                .is_err()
+        );
+        store.delete_opening(dsp.id).unwrap();
+        assert_eq!(store.list_openings().unwrap().len(), 1);
+        assert!(!store.used_ports().unwrap().contains(&30001));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

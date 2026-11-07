@@ -2,6 +2,7 @@ pub mod account;
 pub mod addons;
 pub mod admin;
 pub mod new_server;
+pub mod openings;
 pub mod server;
 pub mod servers;
 pub mod settings;

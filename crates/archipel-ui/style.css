@@ -1006,3 +1006,16 @@ input:disabled, textarea:disabled { background: var(--surface-2); color: var(--t
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 .app-version { text-align: center; padding: 24px 0 16px; }
+
+/* Openings (desktop): ports for games hosted from the game itself. */
+.openings { margin-top: 32px; display: flex; flex-direction: column; gap: 14px; }
+.openings-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.openings-head > div { flex: 1 1 320px; }
+.openings-head p { margin: 4px 0 0; }
+.opening-form { display: flex; flex-direction: column; gap: 14px; max-width: 560px; }
+.opening-form .field .field { margin-top: 8px; }
+.opening-card { display: flex; flex-direction: column; gap: 10px; }
+.opening-card.running { border-top: 3px solid var(--good); }
+.opening-card p { margin: 0; }
+.opening-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.opening-name { margin: 0; font-size: 17px; overflow-wrap: anywhere; }

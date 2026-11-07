@@ -22,7 +22,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::games::Games;
-use crate::store::{NewServer, ServerRow, Store, UserRow};
+use crate::store::{NewServer, OpeningRow, ServerRow, Store, UserRow};
 use crate::supervisor::Supervisor;
 use crate::{files, fsops};
 
@@ -85,6 +85,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/internet", get(internet))
         .route("/api/internet/check", post(check_internet))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/openings", get(list_openings).post(create_opening))
+        .route("/api/openings/{id}", axum::routing::delete(delete_opening))
+        .route("/api/openings/{id}/open", post(open_opening))
+        .route("/api/openings/{id}/close", post(close_opening))
         .route("/api/probe", post(probe))
         .route("/api/users", get(list_users).post(create_user))
         .route(
@@ -623,7 +627,7 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
             ),
             None,
         ),
-        Some(reacher) => match reacher.status(row.id) {
+        Some(reacher) => match reacher.status(crate::reach::Holder::Server(row.id)) {
             // Not running: the address friends will use once it runs.
             None => {
                 let machine = reacher.machine();
@@ -643,40 +647,9 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
                 (connect_at(host), None)
             }
             Some(status) => {
-                // This computer's last check from outside stands for its servers.
-                let verified = reacher
-                    .verified()
-                    .filter(|_| status.state != ReachState::Checking);
-                let hostname = crate::reach::settings(&app.store)
-                    .map(|s| s.public_host)
-                    .unwrap_or_default();
-                let local = status.local_ip.and_then(|ip| connect_at(ip.to_string()));
-                let public = status
-                    .public_ip
-                    .filter(|_| status.state == ReachState::Internet)
-                    .and_then(|ip| {
-                        connect_at(crate::reach::public_host(ip, &hostname, verified.as_ref()))
-                    });
-                // The whole pool: every server's ports, and the spare one the check
-                // from outside tries.
-                let forward = match (status.state, app.cfg.port_range()) {
-                    (ReachState::LocalOnly, Ok((first, last))) => {
-                        vec![format!("ports {first}-{last} (TCP and UDP)")]
-                    }
-                    _ => Vec::new(),
-                };
-                (
-                    public.clone().or(local.clone()),
-                    Some(Reach {
-                        state: status.state,
-                        local,
-                        public,
-                        forward,
-                        detail: status.detail,
-                        firewall: firewall(&app.cfg, verified.as_ref()),
-                        verified,
-                    }),
-                )
+                let ports: Vec<u16> = row.ports.values().copied().collect();
+                let reach = reach_view(app, reacher, status, &ports, connect_at);
+                (reach.public.clone().or(reach.local.clone()), Some(reach))
             }
         },
     };
@@ -701,6 +674,191 @@ fn server_view(app: &App, row: &ServerRow) -> ServerView {
         auto_start: row.auto_start,
         created_at: row.created_at,
     }
+}
+
+/// Who can join a running server or an open opening on `ports`, from what the
+/// router did; `connect_at` makes an address of a host.
+fn reach_view(
+    app: &App,
+    reacher: &crate::reach::Reacher,
+    status: crate::reach::Status,
+    ports: &[u16],
+    connect_at: impl Fn(String) -> Option<String>,
+) -> Reach {
+    // This computer's last check from outside stands for the pool's ports, not
+    // for one typed in outside it.
+    let in_pool = reacher.in_pool(ports);
+    let pool = app.cfg.port_range().ok();
+    let verified = reacher
+        .verified()
+        .filter(|_| status.state != ReachState::Checking)
+        .map(|v| match (in_pool, pool) {
+            (false, Some((first, last))) => Verification {
+                outside: Outside::Unverifiable,
+                detail: Some(format!(
+                    "archipel checks its own ports, {first}-{last}, and the game listens on {}",
+                    port_list(ports)
+                )),
+                ..v
+            },
+            _ => v,
+        });
+    let hostname = crate::reach::settings(&app.store)
+        .map(|s| s.public_host)
+        .unwrap_or_default();
+    let local = status.local_ip.and_then(|ip| connect_at(ip.to_string()));
+    let public = status
+        .public_ip
+        .filter(|_| status.state == ReachState::Internet)
+        .and_then(|ip| connect_at(crate::reach::public_host(ip, &hostname, verified.as_ref())));
+    // In the pool, the whole pool: every server's ports, and the spare one the
+    // check from outside tries. Outside it, these ports.
+    let forward = match (status.state, pool) {
+        (ReachState::LocalOnly, Some((first, last))) if in_pool => {
+            vec![format!("ports {first}-{last} (TCP and UDP)")]
+        }
+        (ReachState::LocalOnly, _) => vec![format!("{} (TCP and UDP)", port_list(ports))],
+        _ => Vec::new(),
+    };
+    let firewall = if in_pool {
+        firewall(&app.cfg, verified.as_ref())
+    } else {
+        let first = ports.iter().min().copied().unwrap_or_default();
+        let last = ports.iter().max().copied().unwrap_or_default();
+        crate::reach::firewall_hint(first, last)
+    };
+    Reach {
+        state: status.state,
+        local,
+        public,
+        forward,
+        detail: status.detail,
+        firewall,
+        verified,
+    }
+}
+
+/// `port 8469`, `ports 30005-30006`.
+fn port_list(ports: &[u16]) -> String {
+    match (ports.iter().min(), ports.iter().max()) {
+        (Some(a), Some(b)) if a != b => format!("ports {a}-{b}"),
+        (Some(a), _) => format!("port {a}"),
+        _ => "no port".into(),
+    }
+}
+
+// ---------------------------------------------------------------- openings
+
+/// Most ports one opening takes from the pool.
+const MAX_OPENING_PORTS: u16 = 8;
+
+fn opening_view(app: &App, reacher: &crate::reach::Reacher, row: &OpeningRow) -> OpeningView {
+    let first = row.ports.first().copied().unwrap_or_default();
+    let reach = reacher
+        .status(crate::reach::Holder::Opening(row.id))
+        .map(|status| {
+            reach_view(app, reacher, status, &row.ports, |host| {
+                Some(format!("{host}:{first}"))
+            })
+        });
+    OpeningView {
+        id: row.id,
+        name: row.name.clone(),
+        ports: row.ports.clone(),
+        custom: row.custom,
+        open: reacher.is_open(row.id),
+        reach,
+        created_at: row.created_at,
+    }
+}
+
+/// The desktop's reacher, which openings need.
+fn reacher_of(app: &App) -> ApiResult<&Arc<crate::reach::Reacher>> {
+    app.supervisor
+        .reacher()
+        .ok_or_else(|| not_found("only the desktop app opens ports on a router"))
+}
+
+fn load_opening(app: &App, id: u64) -> ApiResult<OpeningRow> {
+    app.store
+        .get_opening(id)?
+        .ok_or_else(|| not_found("no such opening"))
+}
+
+async fn list_openings(State(app): S, _: Caller) -> ApiResult<Json<Vec<OpeningView>>> {
+    let reacher = reacher_of(&app)?;
+    Ok(Json(
+        app.store
+            .list_openings()?
+            .iter()
+            .map(|r| opening_view(&app, reacher, r))
+            .collect(),
+    ))
+}
+
+async fn create_opening(
+    State(app): S,
+    _: Caller,
+    Json(req): Json<NewOpening>,
+) -> ApiResult<Json<OpeningView>> {
+    let reacher = reacher_of(&app)?;
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err(bad("a name has 1 to 40 characters"));
+    }
+    let wanted = match (req.port, req.count) {
+        (Some(_), Some(_)) => return Err(bad("give a number of ports or a port, not both")),
+        (Some(0), _) => return Err(bad("a port is 1 to 65535")),
+        (Some(port), None) => crate::store::Wanted::Port(port),
+        (None, count) => match count.unwrap_or(1) {
+            n @ 1..=MAX_OPENING_PORTS => crate::store::Wanted::Pool(n),
+            _ => return Err(bad(format!("1 to {MAX_OPENING_PORTS} ports"))),
+        },
+    };
+    let row = app
+        .store
+        .create_opening(name, wanted, app.cfg.port_range()?)
+        .map_err(|e| bad(format!("{e:#}")))?;
+    info!(opening = row.id, ports = ?row.ports, "created opening {}", row.name);
+    Ok(Json(opening_view(&app, reacher, &row)))
+}
+
+async fn delete_opening(State(app): S, _: Caller, Path(id): Path<u64>) -> ApiResult<StatusCode> {
+    let reacher = reacher_of(&app)?;
+    let row = load_opening(&app, id)?;
+    reacher.close(crate::reach::Holder::Opening(id)).await;
+    app.store.delete_opening(id)?;
+    info!(opening = id, "deleted opening {}", row.name);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Forwards an opening's ports, in the background: it says `checking` until the
+/// router answered.
+async fn open_opening(
+    State(app): S,
+    _: Caller,
+    Path(id): Path<u64>,
+) -> ApiResult<Json<OpeningView>> {
+    let reacher = reacher_of(&app)?.clone();
+    let row = load_opening(&app, id)?;
+    if !reacher.is_open(id) {
+        let holder = crate::reach::Holder::Opening(id);
+        reacher.opening(holder, &row.ports);
+        let (reacher, ports) = (reacher.clone(), row.ports.clone());
+        tokio::spawn(async move { reacher.forward_for(holder, ports).await });
+    }
+    Ok(Json(opening_view(&app, &reacher, &row)))
+}
+
+async fn close_opening(
+    State(app): S,
+    _: Caller,
+    Path(id): Path<u64>,
+) -> ApiResult<Json<OpeningView>> {
+    let reacher = reacher_of(&app)?;
+    let row = load_opening(&app, id)?;
+    reacher.close(crate::reach::Holder::Opening(id)).await;
+    Ok(Json(opening_view(&app, reacher, &row)))
 }
 
 async fn list_servers(State(app): S, caller: Caller) -> ApiResult<Json<Vec<ServerView>>> {

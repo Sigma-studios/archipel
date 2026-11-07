@@ -74,6 +74,14 @@ enum Via {
     Upnp(Gateway<Tokio>),
 }
 
+/// What ports are forwarded for: a running server, or an opening switched on (a
+/// game hosted from the game itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Holder {
+    Server(u64),
+    Opening(u64),
+}
+
 struct Entry {
     status: Status,
     ports: Vec<u16>,
@@ -83,7 +91,7 @@ struct Entry {
 
 pub struct Reacher {
     http: reqwest::Client,
-    servers: Mutex<HashMap<u64, Entry>>,
+    servers: Mutex<HashMap<Holder, Entry>>,
     /// The computer's, from the last check or server start.
     machine: Mutex<Status>,
     /// The last check from outside, while the computer's state is `Internet`.
@@ -120,16 +128,23 @@ impl Reacher {
         }))
     }
 
-    /// Who can reach a running server: what the router did for it, unless friends
-    /// got through from outside where it would not (the pool forwarded by hand).
-    pub fn status(&self, server: u64) -> Option<Status> {
-        let status = self.servers.lock().get(&server).map(|e| e.status.clone())?;
+    /// Who can reach a running server or an open opening: what the router did for
+    /// it, unless friends got through from outside where it would not (the pool
+    /// forwarded by hand, which says nothing of ports outside it).
+    pub fn status(&self, holder: Holder) -> Option<Status> {
+        let (status, ports) = self
+            .servers
+            .lock()
+            .get(&holder)
+            .map(|e| (e.status.clone(), e.ports.clone()))?;
         let machine = self.machine();
-        Some(if machine.state == ReachState::Internet {
-            by_hand(status, self.verified().as_ref(), machine.public_ip)
-        } else {
-            status
-        })
+        Some(
+            if machine.state == ReachState::Internet && self.in_pool(&ports) {
+                by_hand(status, self.verified().as_ref(), machine.public_ip)
+            } else {
+                status
+            },
+        )
     }
 
     /// Whether this computer can receive games from the internet, as last seen.
@@ -203,15 +218,22 @@ impl Reacher {
         *self.machine.lock() = status;
     }
 
-    /// A port of the pool no server has: the last one.
-    fn spare_port(&self) -> Option<u16> {
-        let taken: std::collections::HashSet<u16> = self
-            .store
-            .list_servers()
-            .unwrap_or_default()
+    /// Whether every one of `ports` is in the pool, which the check from outside
+    /// stands for.
+    pub fn in_pool(&self, ports: &[u16]) -> bool {
+        ports
             .iter()
-            .flat_map(|r| r.ports.values().copied())
-            .collect();
+            .all(|p| (self.pool.0..=self.pool.1).contains(p))
+    }
+
+    /// Whether an opening's ports are forwarded (or being).
+    pub fn is_open(&self, opening: u64) -> bool {
+        self.servers.lock().contains_key(&Holder::Opening(opening))
+    }
+
+    /// A port of the pool no server or opening has: the last one.
+    fn spare_port(&self) -> Option<u16> {
+        let taken = self.store.used_ports().unwrap_or_default();
         (self.pool.0..=self.pool.1)
             .rev()
             .find(|p| !taken.contains(p))
@@ -328,12 +350,19 @@ impl Reacher {
         }
     }
 
-    /// Opens a starting server's ports (TCP and UDP each: games use either or
-    /// both) and works out who can reach it.
-    pub async fn open(&self, server: u64, ports: Vec<u16>) {
+    /// Opens a starting server's ports, or an opening's (TCP and UDP each: games
+    /// use either or both), and works out who can reach them.
+    pub async fn open(&self, holder: Holder, ports: Vec<u16>) {
+        self.opening(holder, &ports);
+        self.forward_for(holder, ports).await;
+    }
+
+    /// Says `holder`'s ports are being opened, at once: until [`Self::forward_for`]
+    /// has the router's answer, it is `checking`.
+    pub fn opening(&self, holder: Holder, ports: &[u16]) {
         let local_ip = local_ip();
         self.servers.lock().insert(
-            server,
+            holder,
             Entry {
                 status: Status {
                     state: ReachState::Checking,
@@ -341,14 +370,20 @@ impl Reacher {
                     public_ip: None,
                     detail: None,
                 },
-                ports: ports.clone(),
+                ports: ports.to_vec(),
                 via: None,
                 local_ip,
             },
         );
+    }
+
+    /// Asks the router to forward the ports [`Self::opening`] announced.
+    pub async fn forward_for(&self, holder: Holder, ports: Vec<u16>) {
         let (status, via) = self.assess(&ports).await;
-        info!(server, ?status.state, "reachability");
-        {
+        info!(?holder, ?status.state, "reachability");
+        // A port outside the pool says nothing of the computer's: the router may
+        // treat it apart.
+        if self.in_pool(&ports) {
             let mut machine = self.machine.lock();
             let mut verified = self.verified.lock();
             let reached = verified
@@ -367,7 +402,7 @@ impl Reacher {
                 *machine = status.clone();
             }
         }
-        if let Some(entry) = self.servers.lock().get_mut(&server) {
+        if let Some(entry) = self.servers.lock().get_mut(&holder) {
             entry.status = status;
             entry.via = via;
         } else if let Some(via) = via {
@@ -376,9 +411,9 @@ impl Reacher {
         }
     }
 
-    /// Takes a stopped server's ports back.
-    pub async fn close(&self, server: u64) {
-        let entry = self.servers.lock().remove(&server);
+    /// Takes a stopped server's ports back, or a closed opening's.
+    pub async fn close(&self, holder: Holder) {
+        let entry = self.servers.lock().remove(&holder);
         if let Some(Entry {
             via: Some(via),
             ports,
@@ -390,7 +425,7 @@ impl Reacher {
     }
 
     pub async fn close_all(&self) {
-        let ids: Vec<u64> = self.servers.lock().keys().copied().collect();
+        let ids: Vec<Holder> = self.servers.lock().keys().copied().collect();
         for id in ids {
             self.close(id).await;
         }
@@ -1151,26 +1186,55 @@ pub fn firewall_hint(first: u16, last: u16) -> Option<String> {
     let nixos_blocks = !exists("/etc/systemd/system")
         || (nixos_units.iter().any(|u| u.exists())
             && !nixos_units.iter().any(|u| opens(u, first, last)));
+    let one = first == last;
+    let these = if one { "this port" } else { "these ports" };
     if nixos && nixos_blocks {
+        let config = if one {
+            format!(
+                "networking.firewall.allowedTCPPorts = [ {first} ]; and the same \
+                 allowedUDPPorts"
+            )
+        } else {
+            format!(
+                "networking.firewall.allowedTCPPortRanges = [ {{ from = {first}; to = {last}; }} ]; \
+                 and the same allowedUDPPortRanges"
+            )
+        };
         return Some(format!(
-            "NixOS's firewall turns players away unless these ports are open in it: add \
-             networking.firewall.allowedTCPPortRanges = [ {{ from = {first}; to = {last}; }} ]; \
-             and the same allowedUDPPortRanges to your configuration, then run nixos-rebuild switch."
+            "NixOS's firewall turns players away unless {these} open in it: add {config} to \
+             your configuration, then run nixos-rebuild switch.",
+            these = if one {
+                "this port is"
+            } else {
+                "these ports are"
+            },
         ));
     }
     if exists("/run/firewalld") {
+        let ports = if one {
+            first.to_string()
+        } else {
+            format!("{first}-{last}")
+        };
         return Some(format!(
-            "firewalld turns players away unless these ports are open in it: run sudo \
-             firewall-cmd --permanent --add-port={first}-{last}/tcp \
-             --add-port={first}-{last}/udp, then sudo firewall-cmd --reload."
+            "firewalld turns players away unless {these} {are} open in it: run sudo \
+             firewall-cmd --permanent --add-port={ports}/tcp --add-port={ports}/udp, then \
+             sudo firewall-cmd --reload.",
+            are = if one { "is" } else { "are" },
         ));
     }
     let ufw_on = std::fs::read_to_string("/etc/ufw/ufw.conf")
         .is_ok_and(|c| c.lines().any(|l| l.trim() == "ENABLED=yes"));
     if ufw_on {
+        let ports = if one {
+            first.to_string()
+        } else {
+            format!("{first}:{last}")
+        };
         return Some(format!(
-            "ufw turns players away unless these ports are open in it: run sudo ufw allow \
-             {first}:{last}/tcp, then sudo ufw allow {first}:{last}/udp."
+            "ufw turns players away unless {these} {are} open in it: run sudo ufw allow \
+             {ports}/tcp, then sudo ufw allow {ports}/udp.",
+            are = if one { "is" } else { "are" },
         ));
     }
     None
@@ -1206,11 +1270,11 @@ fn local_firewall() -> Option<&'static str> {
     }
 }
 
-/// Whether the NixOS firewall `unit` lets the pool in: its rules, in the scripts
-/// and files of the Nix store it runs, accept the range (`30000:30019` for
-/// iptables, `30000-30019` for nftables) for TCP and UDP.
+/// Whether the NixOS firewall `unit` lets `first..=last` in: its rules, in the
+/// scripts and files of the Nix store it runs, accept a port or range covering it
+/// (`--dport 30000:30019` for iptables, `dport { 22, 30000-30019 }` for nftables)
+/// for TCP and UDP.
 fn opens(unit: &std::path::Path, first: u16, last: u16) -> bool {
-    let ranges = [format!("{first}:{last}"), format!("{first}-{last}")];
     let mut seen = std::collections::HashSet::new();
     let mut files = vec![unit.to_path_buf()];
     let (mut tcp, mut udp) = (false, false);
@@ -1222,7 +1286,7 @@ fn opens(unit: &std::path::Path, first: u16, last: u16) -> bool {
             continue;
         };
         for line in text.lines() {
-            if ranges.iter().any(|r| line.contains(r.as_str())) {
+            if covers(line, first, last) {
                 tcp |= line.contains("tcp");
                 udp |= line.contains("udp");
             }
@@ -1234,6 +1298,24 @@ fn opens(unit: &std::path::Path, first: u16, last: u16) -> bool {
         }
     }
     tcp && udp
+}
+
+/// Whether a firewall rule's `line` names a destination port or range that
+/// covers `first..=last`.
+fn covers(line: &str, first: u16, last: u16) -> bool {
+    let Some((_, ports)) = line.split_once("dport") else {
+        return false;
+    };
+    ports
+        .split(|c: char| !(c.is_ascii_digit() || c == ':' || c == '-'))
+        .filter_map(|word| {
+            let word = word.trim_matches(|c| c == ':' || c == '-');
+            match word.split_once([':', '-']) {
+                Some((a, b)) => Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?)),
+                None => word.parse::<u16>().ok().map(|p| (p, p)),
+            }
+        })
+        .any(|(a, b)| a <= first && last <= b)
 }
 
 /// The files `text` refers to: /nix/store/<hash>-<name>[/…]. A unit's
@@ -1604,6 +1686,22 @@ mod tests {
         )
         .unwrap();
         assert!(opens(&unit, 30000, 30019), "nftables");
+        assert!(opens(&unit, 30005, 30005), "a port of the range");
+        std::fs::write(
+            &unit,
+            "ip46tables -A nixos-fw -p tcp --dport 8469 -j nixos-fw-accept\n\
+             ip46tables -A nixos-fw -p udp --dport 8469 -j nixos-fw-accept\n",
+        )
+        .unwrap();
+        assert!(opens(&unit, 8469, 8469), "one port");
+        assert!(!opens(&unit, 8470, 8470));
+        std::fs::write(
+            &unit,
+            "tcp dport { 22, 8469 } accept\nudp dport { 8469 } accept\n",
+        )
+        .unwrap();
+        assert!(opens(&unit, 8469, 8469), "nftables, one port");
+        assert!(!opens(&unit, 46, 46), "ip46tables is no port");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

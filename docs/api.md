@@ -73,6 +73,11 @@ only once that check saw the name lead to this connection (`host`); otherwise
 | `POST /api/internet/check` | | `Internet`, `checking` until the new check is done |
 | `GET /api/settings` | | `Settings` (desktop app): the archipel asked to check from outside (`probe_url`, empty when off; `default_probe_url`) and the hostname for friends (`public_host`); 404 hosted |
 | `PUT /api/settings` | `Settings` | `Settings`; a change checks again, as `POST /api/internet/check`. `probe_url` is empty or `https://…` (`http://localhost…` for development), `public_host` empty or a hostname |
+| `GET /api/openings` | | `OpeningView[]` (desktop app): ports forwarded for games hosted from the game itself, no server; `reach` while `open`; 404 hosted |
+| `POST /api/openings` | `NewOpening` | `OpeningView`: `count` consecutive ports from the pool (1 to 8, 1 by default) or the game's own `port` (`custom`), not both; 400 if taken |
+| `POST /api/openings/{id}/open` | | `OpeningView`, `checking` until the router answered; forwarded (TCP and UDP) and renewed until closed or the app closes |
+| `POST /api/openings/{id}/close` | | `OpeningView`; its forwardings taken back |
+| `DELETE /api/openings/{id}` | | 204; closed first, its ports back to the pool |
 | `GET /api/users` | | `Vec<UserView>` |
 | `POST /api/users` | `CreateUser` | `UserView` |
 | `PUT /api/users/{username}` | `UpdateUser` | `UserView` |

@@ -170,6 +170,39 @@ pub struct ServerView {
     pub reach: Option<Reach>,
 }
 
+/// Ports the desktop app opens on the router for a game hosted from the game
+/// itself (a mod's multiplayer, a game's own "host" button): no server, only
+/// ports, forwarded while it is switched on (`GET /api/openings`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpeningView {
+    pub id: u64,
+    pub name: String,
+    /// Consecutive ports, TCP and UDP each: the game is set to host on the first.
+    pub ports: Vec<u16>,
+    /// A port typed in, rather than taken from archipel's pool: the check from
+    /// outside does not stand for it.
+    pub custom: bool,
+    /// Forwarded now (switched on until it is switched off or the app closes).
+    pub open: bool,
+    /// Who can join, while it is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Reach>,
+    pub created_at: u64,
+}
+
+/// `POST /api/openings`: a name, and either a number of ports from the pool or
+/// one port of the game's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewOpening {
+    pub name: String,
+    /// How many consecutive ports to take from the pool (1 when neither is given).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u16>,
+    /// The game's own port, when it cannot be changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
 /// How archipel runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

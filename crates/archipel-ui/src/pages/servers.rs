@@ -136,6 +136,10 @@ pub fn Servers() -> impl IntoView {
                     </div>
                 </Show>
             </Show>
+
+            <Show when=desktop>
+                <super::openings::Openings/>
+            </Show>
         </div>
     }
 }
